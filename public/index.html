@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0b0d10" />
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<title>DCA BTC — history</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='32' fill='%23f7931a'/%3E%3Ctext x='32' y='46' font-size='40' font-family='Arial,Helvetica,sans-serif' font-weight='700' text-anchor='middle' fill='white'%3E%E2%82%BF%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark; /* light native controls: date-picker icon, calendar popup */
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --border: #262b33;
+    --text: #e6e8eb;
+    --muted: #8b93a1;
+    --green: #3ecf8e;
+    --red: #e5534b;
+    --yellow: #d9a441;
+    --accent: #5b8def;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; color: var(--muted); margin: 0; }
+  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .banner {
+    background: #3a2a12;
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    padding: 10px 14px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    display: none;
+    font-size: 0.9rem;
+  }
+  .banner.visible { display: block; }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .tile .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .value { font-size: 1.25rem; font-weight: 600; margin-top: 4px; }
+  .controls { margin-bottom: 16px; display: flex; gap: 8px; align-items: center; }
+  .controls { flex-wrap: wrap; }
+  [hidden] { display: none !important; }
+  .filter { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; font-size: 0.82rem; color: var(--muted); }
+  .filter label { cursor: pointer; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .card { text-align: left; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: block; width: 100%; }
+  .card.dim { opacity: 0.65; }
+  .card .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 8px; }
+  .card .big { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .card .big div:last-child { text-align: right; }
+  .card .big small { display: block; font-size: 0.72rem; color: var(--muted); }
+  .card .big strong { font-size: 1.25rem; }
+  .card .big span { font-size: 0.78rem; margin-left: 4px; }
+  .card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 0.8rem; }
+  .card dt { color: var(--muted); }
+  .card dd { margin: 0; text-align: right; }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+  .status.active { background: rgba(62,207,142,0.15); color: var(--green); }
+  .status.paused { background: rgba(217,164,65,0.15); color: var(--yellow); }
+  .status.completed { background: rgba(91,141,239,0.15); color: var(--accent); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; width: min(100% - 32px, 440px); max-height: calc(100% - 32px); }
+  #view-settings { width: min(100% - 32px, 760px); padding: 16px; }
+  #view-settings .panel { background: var(--bg); }
+  dialog::backdrop { background: rgba(0,0,0,0.7); }
+  dialog label { display: block; margin: 8px 0; font-size: 0.85rem; color: var(--muted); }
+  dialog input { display: block; width: 100%; margin-top: 4px; }
+  button {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .status { padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+  .status.CONFIRMED { background: rgba(62,207,142,0.15); color: var(--green); }
+  .status.FAILED { background: rgba(229,83,75,0.15); color: var(--red); }
+  .status.PAUSED { background: rgba(217,164,65,0.15); color: var(--yellow); }
+  .status.PENDING, .status.BROADCAST { background: rgba(91,141,239,0.15); color: var(--accent); }
+  .tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); margin-left: 4px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .reason { color: var(--muted); font-size: 0.78rem; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+  .panel h2 { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 10px; }
+  .qr { background: #fff; padding: 8px; border-radius: 8px; width: 216px; margin: 10px 0; }
+  .qr svg { display: block; width: 200px; height: 200px; }
+  input, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: 8px; }
+  input[type=date] { cursor: pointer; }
+  input:invalid:not(:placeholder-shown) { border-color: var(--red); }
+  .health { display: grid; gap: 6px; font-size: 0.85rem; }
+  .health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .health .ok .dot { background: var(--green); }
+  .health .warning .dot { background: var(--yellow); }
+  .health .critical .dot { background: var(--red); }
+  .health .critical { color: var(--red); }
+  #settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 14px; }
+  #settings-form label { font-size: 0.8rem; color: var(--muted); }
+  #settings-form input { display: block; width: 100%; margin-top: 4px; }
+  #key-input { width: min(100%, 22rem); }
+  #key-form { align-items: stretch; }
+  code { font-size: 0.85rem; word-break: break-all; }
+  .top-actions { flex-wrap: nowrap; }
+  .icon-link { font-size: 1.3rem; line-height: 1; color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  /* F10: strategy "⋯" menu -- a native popover, placed under its button by app.js */
+  .menu { margin: 0; inset: auto; position: absolute; width: 190px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 6px; }
+  .menu:popover-open { display: grid; gap: 4px; }
+  .menu button { text-align: left; border-color: transparent; }
+  .menu hr { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 2px 0; }
+  .danger { color: var(--red); }
+  /* desktop: no "⋯", the menu's buttons sit inline in the bar, destructive ones pushed right */
+  @media (min-width: 700px) {
+    #btn-strategy-menu { display: none; }
+    #strategy-menu { display: flex; flex: 1; gap: 8px; position: static; width: auto; padding: 0; border: 0; background: none; }
+    #strategy-menu hr { display: none; }
+    #strategy-menu button { border-color: var(--border); }
+    #btn-strategy-stop, #btn-strategy-delete { margin-left: auto; } /* never both shown */
+  }
+  button.card:hover { border-color: var(--accent); }
+  .section-title { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 8px; }
+  #health-box summary { cursor: pointer; display: list-item; }
+  #health-box[open] summary { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>DCA BTC</h1>
+    <div class="controls top-actions" id="top-actions">
+      <a id="lock-indicator" href="#settings" class="reason" title="Authenticator" hidden></a>
+      <a id="btn-settings" href="#settings" class="icon-link" aria-label="Settings" title="Settings">⚙</a>
+      <button id="btn-logout">Log out</button>
+    </div>
+  </div>
+
+  <form id="login-form" class="panel" hidden>
+    <h2>Log in</h2>
+    <p class="reason">Stays logged in on this device for 30 days.</p>
+    <div class="controls">
+      <input id="login-password" type="password" required autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <input id="login-code" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code" style="width:8rem">
+      <button type="submit">Log in</button>
+    </div>
+    <span id="login-msg" class="reason" role="status"></span>
+  </form>
+
+  <main id="app">
+
+  <div id="offline-banner" class="banner">Offline — figures below may be out of date. Reconnect to see live data.</div>
+  <div id="banner" class="banner"></div>
+  <div id="setup-banner" class="banner"></div>
+
+  <div id="view-main">
+  <p id="strategy-back" hidden><a href="#">← All strategies</a></p>
+  <div class="filter" id="strategy-filter" role="group" aria-label="Show strategies">
+    <label><input type="checkbox" value="active" checked> Active</label>
+    <label><input type="checkbox" value="paused"> Paused</label>
+    <label><input type="checkbox" value="completed"> Completed</label>
+    <button type="button" id="btn-new-strategy">+ New strategy</button>
+  </div>
+  <div id="cards" class="cards" aria-label="Strategies"></div>
+  <div id="strategy-bar" class="controls" hidden>
+    <button id="btn-buy" class="primary">Buy now</button>
+    <button id="btn-strategy-menu" popovertarget="strategy-menu" aria-label="More strategy actions" title="More actions">⋯</button>
+    <div id="strategy-menu" class="menu" popover>
+      <button id="btn-strategy-pause">Pause strategy</button>
+      <button id="btn-strategy-resume">Resume strategy</button>
+      <button id="btn-strategy-edit">Edit</button>
+      <hr>
+      <button id="btn-strategy-stop" class="danger">Complete</button>
+      <button id="btn-strategy-delete" class="danger">Delete history</button>
+    </div>
+  </div>
+  <p id="buy-status" class="reason" role="status"></p>
+
+  <dialog id="strategy-dialog" aria-labelledby="strategy-dialog-title">
+    <form id="strategy-form" method="dialog">
+      <h2 id="strategy-dialog-title">New strategy</h2>
+      <label>Label (optional) <input id="sf-label" maxlength="40" placeholder="e.g. August/2026"></label>
+      <label>Amount per day (USDT0) <input id="sf-amount" required inputmode="decimal" type="number" min="0.000001" step="0.000001"></label>
+      <label>End date (optional, UTC) <input id="sf-end" type="date"></label>
+      <label>Max total (optional, USDT0) — completes when this much is invested <input id="sf-max" inputmode="decimal" type="number" min="0.000001" step="0.000001"></label>
+      <p id="sf-hint" class="reason"></p>
+      <div class="controls"><button type="submit">Save</button><button type="button" id="sf-cancel">Cancel</button></div>
+      <span id="sf-msg" class="reason" role="status"></span>
+    </form>
+  </dialog>
+
+  <details class="panel" id="health-box">
+    <summary id="health-summary" class="health">Wallet health: loading…</summary>
+    <div id="health" class="health"></div>
+  </details>
+
+  <div id="strategy-detail">
+  <h2 class="section-title">This strategy</h2>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Status</th>
+          <th>USDT0</th>
+          <th>WBTC</th>
+          <th>Effective price</th>
+          <th>Oracle</th>
+          <th>Deviation</th>
+          <th>Gas</th>
+          <th>Tx</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  </div>
+  </div>
+
+  <dialog id="view-settings" aria-labelledby="settings-title">
+  <div class="topbar"><h2 id="settings-title" class="section-title">Settings</h2><button type="button" id="settings-close" aria-label="Close settings">✕</button></div>
+
+  <section class="panel">
+    <h2>Scheduled buying (all strategies)</h2>
+    <div class="controls">
+      <button id="btn-pause">Pause all</button>
+      <button id="btn-resume">Resume all</button>
+      <span id="control-status" class="reason"></span>
+    </div>
+  </section>
+
+  <section class="panel" id="auth-panel">
+    <h2>Authenticator</h2>
+    <div id="totp-setup" hidden>
+      <p class="reason">Buying, resuming and strategy changes need a code from Authy or Google Authenticator.</p>
+      <button id="btn-totp-setup">Set up authenticator</button>
+      <div id="totp-enrol" hidden>
+        <div id="totp-qr" class="qr"></div>
+        <p class="reason">Scan the code, or type this key in the app: <code id="totp-secret"></code></p>
+        <form id="form-totp-confirm" class="controls">
+          <input id="totp-confirm-code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="width:8rem">
+          <button type="submit">Confirm</button>
+        </form>
+      </div>
+    </div>
+    <div id="totp-ready" class="controls" hidden>
+      <span id="elevation-label"></span>
+      <form id="form-unlock" class="controls">
+        <input id="unlock-code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="width:8rem">
+        <button type="submit">Unlock</button>
+      </form>
+      <button id="btn-lock">Lock now</button>
+    </div>
+    <div class="controls">
+      <span id="session-label" class="reason"></span>
+      <button id="btn-logout-all">Log out everywhere</button>
+    </div>
+    <span id="auth-msg" class="reason" role="status"></span>
+  </section>
+
+  <section class="panel" id="wallet-panel">
+    <h2>Wallet</h2>
+    <p>DCA wallet: <code id="wallet-address">—</code> <a id="wallet-link" target="_blank" rel="noopener noreferrer" hidden>Polygonscan</a></p>
+    <form id="key-form" class="controls">
+      <input id="key-input" type="password" autocomplete="off" spellcheck="false" required placeholder="New private key (0x + 64 hex)" aria-label="New private key">
+      <button type="submit">Replace key</button>
+    </form>
+    <p class="reason">The key is never shown again. Keep a backup outside this server. After replacing it, fund the new address with USDT0 and POL.</p>
+    <span id="key-msg" class="reason" role="status"></span>
+  </section>
+
+  <section class="panel" id="settings-panel">
+    <h2>Settings (all strategies)</h2>
+    <form id="settings-form">
+      <label>Max slippage (%) <input id="st-maxSlippagePct" type="number" inputmode="decimal" required></label>
+      <label>Max price impact (%) <input id="st-maxPriceImpactPct" type="number" inputmode="decimal" required></label>
+      <label>Max deviation vs Chainlink (%) <input id="st-maxOracleDeviationPct" type="number" inputmode="decimal" required></label>
+      <label>Approval days <input id="st-approvalDays" type="number" inputmode="numeric" required></label>
+      <label>Min POL balance <input id="st-minPolBalance" type="number" inputmode="decimal" required></label>
+      <div class="controls"><button type="submit">Save settings</button><span id="st-msg" class="reason" role="status"></span></div>
+    </form>
+  </section>
+
+  <section class="panel" id="report-panel">
+    <h2>Email report</h2>
+    <label>Scheduled-run emails
+      <select id="report-mode">
+        <option value="all">Every run</option>
+        <option value="errors">Only errors (failed runs)</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <label>Low-funds alert: warn when USDT0 or POL lasts this many days or less
+      <input id="alert-days" type="number" inputmode="numeric" min="0" max="30" step="1" required>
+    </label>
+    <p class="reason">Checked once a day after the scheduled run. 0 = only when the wallet ran out; running out always sends an email, whatever the report mode.</p>
+    <p class="reason" id="report-note"></p>
+    <span id="report-msg" class="reason" role="status"></span>
+  </section>
+  </dialog>
+  </main>
+
+  <script src="/vendor/qrcode.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

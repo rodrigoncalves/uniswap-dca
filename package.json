@@ -1,0 +1,35 @@
+{
+  "name": "uniswap-dca-bot",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "check": "tsx --env-file=.env src/check.ts",
+    "dca": "tsx --env-file=.env src/dca.ts",
+    "buy": "tsx --env-file=.env src/dca.ts --manual",
+    "app": "tsx --env-file=.env src/server.ts",
+    "pause": "tsx --env-file=.env src/control.ts pause",
+    "resume": "tsx --env-file=.env src/control.ts resume",
+    "revoke": "tsx --env-file=.env src/revoke.ts",
+    "approve": "tsx --env-file=.env src/approve.ts",
+    "export": "tsx --env-file=.env scripts/export.ts",
+    "import-manual": "tsx --env-file=.env scripts/import-manual.ts",
+    "totp-reset": "tsx --env-file=.env scripts/totp-reset.ts",
+    "seed": "tsx --env-file=.env scripts/seed-history.ts",
+    "fork": "scripts/fork.sh"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^24.0.0"
+  }
+}
