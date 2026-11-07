@@ -13,9 +13,9 @@
     const fmtDateTime = (v) => { const t = new Date(v); return `${fmtDate(v)} ${pad2(t.getHours())}:${pad2(t.getMinutes())}`; };
     const escapeText = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-    function tile(label, value, cls = "") {
+    function tile(label, value, cls = "", minor = false) {
       const div = document.createElement("div");
-      div.className = "tile";
+      div.className = minor ? "tile minor" : "tile";
       div.innerHTML = `<div class="label">${label}</div><div class="value ${cls}">${value}</div>`;
       return div;
     }
@@ -35,14 +35,16 @@
     function renderTiles(t) {
       const el = document.getElementById("tiles");
       el.innerHTML = "";
+      // headline figures first, the counters in a quieter second row
+      const pnl = fmtPnl(t).replace(/ \((.*)\)$/, "<small>$1</small>");
       el.appendChild(tile("Invested", fmtUsd(t.totalInvestedUsdt)));
       el.appendChild(tile("BTC accumulated", fmtBtc(t.totalBtc)));
       el.appendChild(tile("Average price", t.weightedAvgPrice ? fmtUsd(t.weightedAvgPrice) : "—"));
-      el.appendChild(tile("Latest price", t.latestMarketPrice ? fmtUsd(t.latestMarketPrice) : "—"));
-      el.appendChild(tile("Revenue", fmtPnl(t), pnlClass(t)));
-      el.appendChild(tile("Purchases", t.confirmedCount));
-      el.appendChild(tile("Failures", t.failedCount));
-      el.appendChild(tile("Total gas", fmtUsd(t.totalGasUsd)));
+      el.appendChild(tile("Revenue", pnl, pnlClass(t)));
+      el.appendChild(tile("Latest price", t.latestMarketPrice ? fmtUsd(t.latestMarketPrice) : "—", "", true));
+      el.appendChild(tile("Purchases", t.confirmedCount, "", true));
+      el.appendChild(tile("Failures", t.failedCount, t.failedCount > 0 ? "neg" : "", true));
+      el.appendChild(tile("Total gas", fmtUsd(t.totalGasUsd), "", true));
     }
 
     function renderBanner(control) {
@@ -51,7 +53,7 @@
         banner.classList.add("visible");
         const since = control.pausedAt ? fmtDateTime(control.pausedAt) : "unknown date";
         const until = control.pausedUntil ? ` until ${fmtDateTime(control.pausedUntil)}` : "";
-        banner.textContent = `⏸ DCA PAUSED since ${since}${until}${control.reason ? " — " + control.reason : ""}`;
+        banner.textContent = `DCA paused since ${since}${until}${control.reason ? " — " + control.reason : ""}`;
       } else {
         banner.classList.remove("visible");
       }
@@ -132,8 +134,8 @@
     // go to a view; re-render when already there (hashchange wouldn't fire)
     const go = (hash) => { if (location.hash === hash || (hash === "" && location.hash === "#")) load(); else location.hash = hash; };
 
-    function card(s, link) {
-      const el = document.createElement(link ? "button" : "div");
+    function card(s) {
+      const el = document.createElement("button");
       el.className = "card" + (s.status === "active" ? "" : " dim");
       const head = document.createElement("div");
       head.className = "head";
@@ -167,32 +169,82 @@
         dd.textContent = v;
         list.append(dt, dd);
       }
-      el.append(head, big, list);
-      if (link) {
-        el.type = "button";
-        el.addEventListener("click", () => go(`#s/${s.id}`));
+      el.append(head, big);
+      // progress toward the max total, when the strategy has one
+      if (s.maxTotal && Number(s.maxTotal) > 0) {
+        const bar = document.createElement("div");
+        bar.className = "progress";
+        bar.setAttribute("role", "progressbar");
+        bar.setAttribute("aria-label", "Invested of max total");
+        const pct = Math.min(100, (Number(t.totalInvestedUsdt) / Number(s.maxTotal)) * 100);
+        bar.setAttribute("aria-valuenow", pct.toFixed(0));
+        const fill = document.createElement("div");
+        fill.style.width = `${pct}%`;
+        bar.appendChild(fill);
+        el.appendChild(bar);
       }
+      el.appendChild(list);
+      el.type = "button";
+      el.addEventListener("click", () => go(`#s/${s.id}`));
       return el;
+    }
+
+    // strategy page header: name, status and its rules (the figures live in the tiles)
+    function renderStrategyHead(s) {
+      const head = document.createElement("div");
+      head.className = "strategy-head";
+      const name = document.createElement("h2");
+      name.textContent = strategyName(s);
+      const badge = document.createElement("span");
+      badge.className = `status ${s.status}`;
+      badge.textContent = s.status;
+      head.append(name, badge);
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const items = [["Per day", `${s.amount} USDT0`]];
+      if (s.maxTotal) items.push(["Max total", `${s.maxTotal} USDT0`]);
+      if (s.endDate) items.push(["Ends", fmtDate(s.endDate)]);
+      if (s.stoppedAt) items.push(["Completed", fmtDate(s.stoppedAt)]);
+      items.push(["WBTC to", s.destination ?? "DCA wallet"]);
+      for (const [k, v] of items) {
+        const span = document.createElement("span");
+        const b = document.createElement(v === s.destination ? "code" : "b");
+        b.textContent = v;
+        span.append(`${k} `, b);
+        meta.appendChild(span);
+      }
+      const parts = [head, meta];
+      // F17: one daily swap, one recipient -- active strategies must share a destination
+      const today = new Date().toISOString().slice(0, 10);
+      const active = strategies.filter((x) => x.status === "active" && (!x.endDate || x.endDate >= today));
+      if (s.status === "active" && new Set(active.map((x) => x.destination ?? "")).size > 1) {
+        const warn = document.createElement("p");
+        warn.className = "reason danger";
+        warn.textContent = "Active strategies have different WBTC destinations, so the daily swap keeps the WBTC in the DCA wallet. Give them the same destination (or none) to deliver it.";
+        parts.push(warn);
+      }
+      document.getElementById("strategy-head").replaceChildren(...parts);
     }
 
     function renderTabs() {
       const s = strategies.find((x) => x.id === selected);
       const cards = document.getElementById("cards");
       // home is just the cards; tiles and history live on each strategy's page
-      document.getElementById("strategy-filter").hidden = Boolean(s);
-      for (const id of ["strategy-back", "strategy-bar", "strategy-detail"]) document.getElementById(id).hidden = !s;
+      document.getElementById("home-head").hidden = Boolean(s);
+      cards.hidden = Boolean(s);
+      for (const id of ["strategy-back", "strategy-head", "strategy-bar", "strategy-detail"]) document.getElementById(id).hidden = !s;
       if (!s) {
         const visible = strategies.filter((x) => shownStatuses().has(x.status));
-        cards.replaceChildren(...visible.map((x) => card(x, true)));
+        cards.replaceChildren(...visible.map((x) => card(x)));
         if (visible.length === 0) {
           const empty = document.createElement("p");
-          empty.className = "reason";
+          empty.className = "reason empty";
           empty.textContent = "No strategies match the filter.";
           cards.appendChild(empty);
         }
         return;
       }
-      cards.replaceChildren(card(s, false));
+      renderStrategyHead(s);
       // one primary action (buy into this strategy), the rest in the "⋯" menu
       document.getElementById("btn-strategy-pause").hidden = s.status !== "active";
       const resume = document.getElementById("btn-strategy-resume");
@@ -272,6 +324,9 @@ async function api(path, body, method = "POST") {
 }
 
 const authMsg = document.getElementById("auth-msg");
+const lockSvg = (d) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="${d}"/></svg>`;
+const ICON_LOCK = lockSvg("M8 11V7a4 4 0 0 1 8 0v4");
+const ICON_UNLOCK = lockSvg("M8 11V7a4 4 0 0 1 7.8-1.2");
 let elevationTimer = null;
 
 function renderElevation(elevatedUntil, serverNow) {
@@ -283,8 +338,10 @@ function renderElevation(elevatedUntil, serverNow) {
   const tick = () => {
     const left = elevatedUntil ? Math.ceil((expiresAt - performance.now()) / 60000) : 0;
     const open = left > 0;
-    label.textContent = open ? `🔓 Unlocked · ${left} min left` : "🔒 Locked";
-    document.getElementById("lock-indicator").textContent = open ? `🔓 ${left} min` : "🔒";
+    label.innerHTML = `${open ? ICON_UNLOCK : ICON_LOCK}${open ? `Unlocked · ${left} min left` : "Locked"}`;
+    const indicator = document.getElementById("lock-indicator");
+    indicator.innerHTML = open ? `${ICON_UNLOCK}${left} min` : `${ICON_LOCK}<span class="label-wide">Locked</span>`;
+    indicator.classList.toggle("open", open);
     unlockForm.hidden = open;
     lockBtn.hidden = !open;
     if (!open) clearInterval(elevationTimer);
@@ -363,6 +420,8 @@ function openStrategyDialog(s) {
   // an unchanged past end date must not block editing other fields; the server refuses any new date before tomorrow
   end.min = end.value && end.value < tomorrow ? end.value : tomorrow;
   document.getElementById("sf-max").value = s?.maxTotal ?? "";
+  document.getElementById("sf-dest").value = s?.destination ?? "";
+  checkDestination();
   const room = Number(maxRunTotal) - Number(dailyTotal) + (s?.status === "active" ? Number(s.amount) : 0);
   amount.max = String(Math.max(0, Math.min(Number(maxRunTotal), room)));
   document.getElementById("sf-hint").textContent = `Daily total of active strategies: ${dailyTotal} of ${maxRunTotal} USDT0 per run.`;
@@ -371,6 +430,50 @@ function openStrategyDialog(s) {
   amount.focus();
 }
 
+// F17: live checksum check of the destination field. The rules live on the
+// server (validation.ts parseDestination); the browser only shows the verdict
+// and blocks Save while it's invalid. No auto-fix of the casing: correcting
+// it here would defeat the checksum.
+const destInput = document.getElementById("sf-dest");
+const destStatus = document.getElementById("sf-dest-status");
+let destCheck = Promise.resolve();
+let destSeq = 0;
+let destTimer = null;
+
+function checkDestination() {
+  clearTimeout(destTimer);
+  destTimer = null;
+  const value = destInput.value.trim();
+  const seq = ++destSeq;
+  if (!value) {
+    destInput.setCustomValidity("");
+    destStatus.className = "hint";
+    destStatus.textContent = "";
+    destCheck = Promise.resolve();
+    return destCheck;
+  }
+  destInput.setCustomValidity("checking…"); // Save waits for the verdict
+  destStatus.className = "hint";
+  destStatus.textContent = "Checking…";
+  destCheck = api("/api/destination/check", { destination: value })
+    .then((res) => (res.ok ? res.json() : { ok: false, error: `check failed (${res.status})` }))
+    .catch(() => ({ ok: false, error: "check failed -- connection" }))
+    .then((r) => {
+      if (seq !== destSeq) return; // a newer keystroke owns the field
+      // the field already shows the value -- drop the server's echo of it
+      const error = r.ok ? "" : r.error.replace(/^destination: /, "").replace(/^"[^"]*" is not/, "not").replace(/^"[^"]*" /, "").replace(/^./, (c) => c.toUpperCase());
+      destInput.setCustomValidity(error);
+      destStatus.className = `hint ${r.ok ? "pos" : "danger"}`;
+      destStatus.textContent = r.ok ? `✓ Valid checksum: ${r.address}` : `✗ ${error}`;
+    });
+  return destCheck;
+}
+
+destInput.addEventListener("input", () => {
+  clearTimeout(destTimer);
+  destTimer = setTimeout(checkDestination, 250);
+});
+
 // click anywhere on the date field opens the calendar, not just the small icon
 document.getElementById("sf-end").addEventListener("click", (event) => {
   try { event.target.showPicker(); } catch { /* older browsers: the icon still opens it */ }
@@ -378,6 +481,8 @@ document.getElementById("sf-end").addEventListener("click", (event) => {
 document.getElementById("sf-cancel").addEventListener("click", () => dialog.close());
 document.getElementById("strategy-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (destTimer !== null) await checkDestination(); // typed and saved within the debounce
+  await destCheck;
   if (!event.target.reportValidity()) return;
   const body = {
     label: document.getElementById("sf-label").value,
@@ -386,15 +491,28 @@ document.getElementById("strategy-form").addEventListener("submit", async (event
     maxTotal: document.getElementById("sf-max").value.trim() || null,
   };
   if (editing && body.endDate === editing.endDate) delete body.endDate;
+  const destination = document.getElementById("sf-dest").value.trim();
+  const destChanged = destination !== (editing?.destination ?? "");
+  if (destChanged && destination && !confirm(`Send this strategy's WBTC to ${destination}?\n\nCheck it character by character: WBTC sent to a wrong address is lost.`)) return;
   const res = await withTotp((totp) => editing
     ? api(`/api/strategies/${editing.id}`, totp ? { ...body, totp } : body, "PATCH")
     : api("/api/strategies", totp ? { ...body, totp } : body));
+  const msg = document.getElementById("sf-msg");
   if (!res.ok) {
     const response = await res.json().catch(() => ({}));
-    document.getElementById("sf-msg").textContent = response.error ?? `error ${res.status}`;
+    msg.textContent = response.error ?? `error ${res.status}`;
     return;
   }
   const saved = await res.json();
+  if (destChanged) {
+    // separate TOTP-gated route (F17); the window opened above usually covers it
+    editing = saved;
+    const destRes = await withTotp((totp) => api(`/api/strategies/${saved.id}/destination`, totp ? { destination, totp } : { destination }));
+    if (!destRes.ok) {
+      msg.textContent = `Saved, but the destination was not: ${(await destRes.json().catch(() => ({}))).error ?? `error ${destRes.status}`}`;
+      return;
+    }
+  }
   dialog.close();
   go(`#s/${saved.id}`);
 });
@@ -623,7 +741,7 @@ const settingsDialog = document.getElementById("view-settings");
 let pageHash = "";
 const syncView = () => {
   if (location.hash === "#settings") {
-    if (!settingsDialog.open) settingsDialog.showModal();
+    if (!settingsDialog.open) { settingsDialog.showModal(); settingsDialog.scrollTop = 0; }
     load();
     return;
   }

@@ -2,174 +2,361 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="theme-color" content="#0b0d10" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0e1014" />
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <title>DCA BTC — history</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='32' fill='%23f7931a'/%3E%3Ctext x='32' y='46' font-size='40' font-family='Arial,Helvetica,sans-serif' font-weight='700' text-anchor='middle' fill='white'%3E%E2%82%BF%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%23f7931a' d='M63.04 39.741c-4.274 17.143-21.638 27.575-38.783 23.301C7.12 58.768-3.313 41.404.962 24.262 5.234 7.117 22.597-3.317 39.737.957c17.144 4.274 27.576 21.64 23.302 38.784z'/%3E%3Cpath fill='%23fff' d='M46.11 27.441c.636-4.258-2.606-6.547-7.039-8.074l1.438-5.768-3.511-.875-1.4 5.616c-.923-.23-1.871-.447-2.813-.662l1.41-5.653-3.509-.875-1.439 5.766c-.764-.174-1.514-.346-2.242-.527l.004-.018-4.842-1.209-.934 3.75s2.605.597 2.55.634c1.422.355 1.679 1.296 1.636 2.042l-1.638 6.571c.098.025.225.061.365.117l-.371-.092-2.296 9.205c-.174.432-.615 1.08-1.609.834.035.051-2.552-.637-2.552-.637l-1.743 4.019 4.569 1.139c.85.213 1.683.436 2.503.646l-1.453 5.834 3.507.875 1.439-5.772c.958.26 1.888.5 2.798.726l-1.434 5.745 3.511.875 1.453-5.823c5.987 1.133 10.489.676 12.384-4.739 1.527-4.36-.076-6.875-3.226-8.515 2.294-.529 4.022-2.038 4.483-5.155zM38.087 38.69c-1.085 4.36-8.426 2.003-10.806 1.412l1.928-7.729c2.38.594 10.012 1.77 8.878 6.317zm1.086-11.312c-.99 3.966-7.1 1.951-9.082 1.457l1.748-7.01c1.982.494 8.365 1.416 7.334 5.553z'/%3E%3C/svg%3E">
 <style>
+  /* Self-hosted, no CDN (invariant 5 extended to the browser). SIL OFL 1.1, see /fonts/OFL.txt */
+  @font-face { font-family: "Inter"; src: url("/fonts/inter.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+  @font-face { font-family: "JetBrains Mono"; src: url("/fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+
   :root {
-    color-scheme: dark; /* light native controls: date-picker icon, calendar popup */
-    --bg: #0b0d10;
-    --panel: #14171c;
-    --border: #262b33;
-    --text: #e6e8eb;
-    --muted: #8b93a1;
-    --green: #3ecf8e;
-    --red: #e5534b;
-    --yellow: #d9a441;
-    --accent: #5b8def;
+    color-scheme: dark; /* dark native controls: date-picker icon, calendar popup */
+    --bg: oklch(0.16 0.006 260);
+    --surface: oklch(0.2 0.007 260);
+    --surface-2: oklch(0.235 0.008 260);
+    --line: oklch(0.3 0.009 260);
+    --line-soft: oklch(0.255 0.008 260);
+    --text: oklch(0.965 0.003 260);
+    --text-2: oklch(0.8 0.008 260);
+    --text-3: oklch(0.66 0.012 260);
+    --btc: oklch(0.75 0.165 62);
+    --btc-strong: oklch(0.8 0.16 66);
+    --on-btc: oklch(0.2 0.03 60);
+    --btc-soft: oklch(0.75 0.165 62 / 0.14);
+    --pos: oklch(0.79 0.15 158);
+    --neg: oklch(0.71 0.17 25);
+    --warn: oklch(0.83 0.13 85);
+    --info: oklch(0.76 0.1 250);
+    --radius: 14px;
+    --radius-sm: 10px;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; scrollbar-color: var(--line) transparent; background: var(--bg); }
   body {
     margin: 0;
-    background: var(--bg);
+    min-height: 100vh;
+    background:
+      radial-gradient(900px 420px at 50% -220px, oklch(0.75 0.165 62 / 0.09), transparent 70%) no-repeat,
+      var(--bg);
     color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 16px;
+    font: 400 15px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-feature-settings: "cv11", "ss03";
+    -webkit-font-smoothing: antialiased;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
   }
-  h1 { font-size: 1.1rem; font-weight: 600; color: var(--muted); margin: 0; }
-  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
-  .banner {
-    background: #3a2a12;
-    border: 1px solid var(--yellow);
-    color: var(--yellow);
-    padding: 10px 14px;
-    border-radius: 8px;
-    margin-bottom: 16px;
-    display: none;
-    font-size: 0.9rem;
-  }
-  .banner.visible { display: block; }
-  .tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-  .tile {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 14px;
-  }
-  .tile .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
-  .tile .value { font-size: 1.25rem; font-weight: 600; margin-top: 4px; }
-  .controls { margin-bottom: 16px; display: flex; gap: 8px; align-items: center; }
-  .controls { flex-wrap: wrap; }
-  [hidden] { display: none !important; }
-  .filter { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; font-size: 0.82rem; color: var(--muted); }
-  .filter label { cursor: pointer; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 12px; }
-  .card { text-align: left; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: block; width: 100%; }
-  .card.dim { opacity: 0.65; }
-  .card .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 8px; }
-  .card .big { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border); }
-  .card .big div:last-child { text-align: right; }
-  .card .big small { display: block; font-size: 0.72rem; color: var(--muted); }
-  .card .big strong { font-size: 1.25rem; }
-  .card .big span { font-size: 0.78rem; margin-left: 4px; }
-  .card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 0.8rem; }
-  .card dt { color: var(--muted); }
-  .card dd { margin: 0; text-align: right; }
-.pos { color: var(--green); }
-.neg { color: var(--red); }
-  .status.active { background: rgba(62,207,142,0.15); color: var(--green); }
-  .status.paused { background: rgba(217,164,65,0.15); color: var(--yellow); }
-  .status.completed { background: rgba(91,141,239,0.15); color: var(--accent); }
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; width: min(100% - 32px, 440px); max-height: calc(100% - 32px); }
-  #view-settings { width: min(100% - 32px, 760px); padding: 16px; }
-  #view-settings .panel { background: var(--bg); }
-  dialog::backdrop { background: rgba(0,0,0,0.7); }
-  dialog label { display: block; margin: 8px 0; font-size: 0.85rem; color: var(--muted); }
-  dialog input { display: block; width: 100%; margin-top: 4px; }
-  button {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 14px;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 0.85rem;
-  }
-  button:hover { border-color: var(--accent); }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--muted); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; }
-  tr:hover { background: rgba(255,255,255,0.02); }
-  .status { padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
-  .status.CONFIRMED { background: rgba(62,207,142,0.15); color: var(--green); }
-  .status.FAILED { background: rgba(229,83,75,0.15); color: var(--red); }
-  .status.PAUSED { background: rgba(217,164,65,0.15); color: var(--yellow); }
-  .status.PENDING, .status.BROADCAST { background: rgba(91,141,239,0.15); color: var(--accent); }
-  .tag { font-size: 0.68rem; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); margin-left: 4px; }
-  a { color: var(--accent); text-decoration: none; }
+  ::selection { background: oklch(0.75 0.165 62 / 0.35); color: var(--text); }
+  :focus-visible { outline: 2px solid var(--btc); outline-offset: 2px; border-radius: 6px; }
+  .shell { max-width: 1120px; margin: 0 auto; }
+  h1, h2, h3 { margin: 0; text-wrap: balance; }
+  code, .mono { font-family: var(--mono); font-size: 0.85em; }
+  code { word-break: break-all; }
+  a { color: var(--btc-strong); text-decoration: none; text-underline-offset: 3px; }
   a:hover { text-decoration: underline; }
-  .empty { color: var(--muted); padding: 24px; text-align: center; }
-  .reason { color: var(--muted); font-size: 0.78rem; }
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
-  .panel h2 { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 10px; }
-  .qr { background: #fff; padding: 8px; border-radius: 8px; width: 216px; margin: 10px 0; }
-  .qr svg { display: block; width: 200px; height: 200px; }
-  input, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: 8px; }
-  input[type=date] { cursor: pointer; }
-  input:invalid:not(:placeholder-shown) { border-color: var(--red); }
-  .health { display: grid; gap: 6px; font-size: 0.85rem; }
-  .health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .health .ok .dot { background: var(--green); }
-  .health .warning .dot { background: var(--yellow); }
-  .health .critical .dot { background: var(--red); }
-  .health .critical { color: var(--red); }
-  #settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 14px; }
-  #settings-form label { font-size: 0.8rem; color: var(--muted); }
-  #settings-form input { display: block; width: 100%; margin-top: 4px; }
-  #key-input { width: min(100%, 22rem); }
-  #key-form { align-items: stretch; }
-  code { font-size: 0.85rem; word-break: break-all; }
+  svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---------- top bar */
+  .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 28px; }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 1.05rem; font-weight: 650; letter-spacing: -0.01em; }
+  .brand svg { width: 28px; height: 28px; }
+  .brand span { color: var(--text-3); font-weight: 500; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .top-actions { flex-wrap: nowrap; }
-  .icon-link { font-size: 1.3rem; line-height: 1; color: var(--muted); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
+    border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface);
+    color: var(--text-2); font-size: 0.8rem; font-weight: 500; font-variant-numeric: tabular-nums;
+  }
+  .pill svg.i { width: 15px; height: 15px; }
+  .pill.open { color: var(--btc-strong); border-color: oklch(0.75 0.165 62 / 0.4); background: var(--btc-soft); }
+  a.pill:hover { text-decoration: none; border-color: var(--line); color: var(--text); }
+
+  /* ---------- buttons and fields */
+  button, .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    height: 38px; padding: 0 14px;
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    color: var(--text); font-family: inherit; font-size: 0.875rem; font-weight: 500; line-height: 1; cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s, transform 0.15s var(--ease-out);
+  }
+  button:hover { background: oklch(0.27 0.009 260); border-color: oklch(0.36 0.01 260); }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+  button.primary { background: var(--btc); border-color: transparent; color: var(--on-btc); font-weight: 600; }
+  button.primary:hover { background: var(--btc-strong); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
+  button.ghost:hover { background: var(--surface-2); color: var(--text); }
+  button.icon, .icon-link { width: 38px; padding: 0; }
+  .icon-link { display: inline-flex; align-items: center; justify-content: center; height: 38px; border-radius: var(--radius-sm); color: var(--text-2); }
+  .icon-link:hover { background: var(--surface-2); color: var(--text); }
+  .danger, button.danger { color: var(--neg); }
+  button.danger:hover { background: oklch(0.71 0.17 25 / 0.12); border-color: oklch(0.71 0.17 25 / 0.4); }
+  input, select {
+    height: 40px; padding: 0 12px; min-width: 0;
+    background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    color: var(--text); font: inherit; font-size: 0.9rem; font-variant-numeric: tabular-nums;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input::placeholder { color: var(--text-3); }
+  input:hover, select:hover { border-color: oklch(0.38 0.01 260); }
+  input:focus, select:focus { outline: none; border-color: var(--btc); box-shadow: 0 0 0 3px oklch(0.75 0.165 62 / 0.2); }
+  input:user-invalid { border-color: var(--neg); }
+  input[type=date] { cursor: pointer; }
+  input.code { width: 10rem; letter-spacing: 0.2em; font-family: var(--mono); }
+  input.code::placeholder { letter-spacing: 0; font-family: "Inter", sans-serif; }
+  label { display: grid; gap: 6px; font-size: 0.82rem; font-weight: 500; color: var(--text-2); }
+  .hint { font-size: 0.78rem; font-weight: 400; color: var(--text-3); }
+  .reason { color: var(--text-3); font-size: 0.82rem; }
+  .reason:empty { display: none; }
+
+  /* ---------- banners */
+  .banner {
+    display: none; align-items: flex-start; gap: 10px;
+    background: oklch(0.83 0.13 85 / 0.08); border: 1px solid oklch(0.83 0.13 85 / 0.3);
+    color: var(--warn); padding: 12px 14px; border-radius: var(--radius-sm);
+    margin-bottom: 14px; font-size: 0.88rem; line-height: 1.45;
+  }
+  .banner::before {
+    content: ""; flex: none; width: 18px; height: 18px; margin-top: 1px; background: currentColor;
+    -webkit-mask: var(--banner-icon) center / contain no-repeat; mask: var(--banner-icon) center / contain no-repeat;
+    --banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'/%3E%3Cpath d='M12 9v4M12 17h.01'/%3E%3C/svg%3E");
+  }
+  .banner.visible { display: flex; }
+  #banner { --banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M10 15V9M14 15V9'/%3E%3C/svg%3E"); }
+  #offline-banner { color: var(--text-2); background: var(--surface); border-color: var(--line);
+    --banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M2 2l20 20M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 5.2-2.8M19 13a10 10 0 0 0-2.3-1.6M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8A15 15 0 0 0 10.7 5M12 20h.01'/%3E%3C/svg%3E"); }
+
+  /* ---------- login */
+  #login-form { max-width: 380px; margin: 10vh auto 0; padding: 28px; display: grid; gap: 14px; }
+  #login-form h2 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; }
+  #login-form > p { margin: -8px 0 4px; }
+  #login-form input { width: 100%; }
+  #login-form button { width: 100%; height: 42px; margin-top: 4px; }
+
+  /* ---------- home: header, filter, cards */
+  .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .page-head h2 { font-size: 1.75rem; font-weight: 650; letter-spacing: -0.025em; line-height: 1.15; }
+  .filter { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .chip { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--text-3); font-size: 0.8rem; cursor: pointer; position: relative; transition: all 0.15s; user-select: none; }
+  .chip input { position: absolute; opacity: 0; pointer-events: none; }
+  .chip:hover { color: var(--text); border-color: var(--line); }
+  .chip:has(input:checked) { color: var(--text); background: var(--surface-2); border-color: var(--line); }
+  .chip:has(input:checked)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--btc); }
+  .chip:has(input:focus-visible) { outline: 2px solid var(--btc); outline-offset: 2px; }
+  .filter .divider { width: 1px; height: 20px; background: var(--line-soft); margin: 0 4px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; margin-bottom: 18px; }
+  .card {
+    position: relative; display: block; width: 100%; height: auto; padding: 18px; text-align: left;
+    background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--radius);
+    color: var(--text); font: inherit; line-height: 1.4;
+    transition: border-color 0.2s, background-color 0.2s, transform 0.25s var(--ease-out), box-shadow 0.25s var(--ease-out);
+  }
+  button.card:hover { background: var(--surface); border-color: var(--line); transform: translateY(-2px); box-shadow: 0 12px 28px -14px rgb(0 0 0 / 0.7); }
+  button.card:active { transform: translateY(0); }
+  .card.dim { opacity: 0.6; }
+  .card .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; font-size: 0.95rem; margin-bottom: 16px; }
+  .card .big { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+  .card .big div:last-child { text-align: right; }
+  .card .big small { display: block; font-size: 0.75rem; color: var(--text-3); margin-bottom: 4px; }
+  .card .big strong { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .card .big span { display: block; font-size: 0.78rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .progress { height: 4px; border-radius: 4px; background: var(--line-soft); overflow: hidden; margin: -2px 0 14px; }
+  .progress > div { height: 100%; background: var(--btc); border-radius: inherit; }
+  .card dl { margin: 0; padding-top: 12px; border-top: 1px solid var(--line-soft); display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 0.82rem; }
+  .card dt { color: var(--text-3); }
+  .card dd { margin: 0; text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .pos { color: var(--pos); }
+  .neg { color: var(--neg); }
+
+  /* ---------- status badges */
+  .status {
+    display: inline-block; height: 22px; line-height: 22px; padding: 0 9px; border-radius: 999px; white-space: nowrap;
+    font-size: 0.72rem; font-weight: 600; text-transform: lowercase; letter-spacing: 0.01em;
+    background: var(--surface-2); color: var(--text-2);
+  }
+  .status::first-letter { text-transform: uppercase; }
+  .status.active, .status.CONFIRMED { background: oklch(0.79 0.15 158 / 0.13); color: var(--pos); }
+  .status.paused, .status.PAUSED { background: oklch(0.83 0.13 85 / 0.13); color: var(--warn); }
+  .status.completed, .status.PENDING, .status.BROADCAST { background: oklch(0.76 0.1 250 / 0.14); color: var(--info); }
+  .status.FAILED { background: oklch(0.71 0.17 25 / 0.14); color: var(--neg); }
+  .tag { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; margin-left: 6px; border-radius: 6px; background: var(--btc-soft); color: var(--btc-strong); font-size: 0.68rem; font-weight: 600; }
+
+  /* ---------- strategy page */
+  .back { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 14px; color: var(--text-3); font-size: 0.85rem; font-weight: 500; }
+  .back:hover { color: var(--text); text-decoration: none; }
+  .back svg.i { width: 16px; height: 16px; }
+  #strategy-back { margin: 0; }
+  .strategy-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 6px; }
+  .strategy-head h2 { font-size: 1.9rem; font-weight: 650; letter-spacing: -0.025em; line-height: 1.15; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--text-3); font-size: 0.85rem; font-variant-numeric: tabular-nums; margin-bottom: 20px; }
+  .meta b { color: var(--text-2); font-weight: 500; }
+  #strategy-bar { margin-bottom: 8px; }
+  #buy-status { margin: 0 0 16px; min-height: 1px; }
+
   /* F10: strategy "⋯" menu -- a native popover, placed under its button by app.js */
-  .menu { margin: 0; inset: auto; position: absolute; width: 190px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 6px; }
-  .menu:popover-open { display: grid; gap: 4px; }
-  .menu button { text-align: left; border-color: transparent; }
-  .menu hr { width: 100%; border: 0; border-top: 1px solid var(--border); margin: 2px 0; }
-  .danger { color: var(--red); }
+  .menu { margin: 0; inset: auto; position: absolute; width: 200px; background: var(--surface-2); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 6px; box-shadow: 0 16px 40px -12px rgb(0 0 0 / 0.75); }
+  .menu:popover-open { display: grid; gap: 2px; }
+  .menu button { justify-content: flex-start; background: transparent; border-color: transparent; height: 36px; }
+  .menu button:hover { background: oklch(0.29 0.009 260); }
+  .menu hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
   /* desktop: no "⋯", the menu's buttons sit inline in the bar, destructive ones pushed right */
   @media (min-width: 700px) {
     #btn-strategy-menu { display: none; }
-    #strategy-menu { display: flex; flex: 1; gap: 8px; position: static; width: auto; padding: 0; border: 0; background: none; }
+    #strategy-menu { display: flex; flex: 1; gap: 8px; position: static; width: auto; padding: 0; border: 0; background: none; box-shadow: none; }
     #strategy-menu hr { display: none; }
-    #strategy-menu button { border-color: var(--border); }
+    #strategy-menu button { background: var(--surface-2); border-color: var(--line); }
+    #strategy-menu button.danger { background: transparent; border-color: transparent; }
+    #strategy-menu button.danger:hover { background: oklch(0.71 0.17 25 / 0.12); }
     #btn-strategy-stop, #btn-strategy-delete { margin-left: auto; } /* never both shown */
   }
-  button.card:hover { border-color: var(--accent); }
-  .section-title { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 8px; }
-  #health-box summary { cursor: pointer; display: list-item; }
-  #health-box[open] summary { margin-bottom: 8px; }
+
+  .section-title { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-bottom: 28px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: var(--radius); overflow: hidden; }
+  .tile { background: var(--surface); padding: 16px 18px; min-width: 0; }
+  .tile .label { font-size: 0.78rem; color: var(--text-3); }
+  .tile .value { font-size: 1.45rem; font-weight: 650; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; line-height: 1.2; }
+  .tile .value small { display: block; font-size: 0.8rem; font-weight: 500; letter-spacing: 0; margin-top: 2px; }
+  .tile.minor { background: oklch(0.18 0.006 260); padding: 12px 18px; }
+  .tile.minor .value { font-size: 1rem; font-weight: 600; margin-top: 2px; }
+
+  /* ---------- history table */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--surface); }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; vertical-align: top; }
+  th { position: sticky; top: 0; background: var(--surface); color: var(--text-3); font-weight: 500; font-size: 0.75rem; }
+  td { color: var(--text-2); }
+  td:first-child { color: var(--text); font-weight: 500; }
+  th:nth-child(n+3):not(:last-child), td:nth-child(n+3):not(:last-child) { text-align: right; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background-color 0.12s; }
+  tbody tr:hover td { background: oklch(0.22 0.008 260); }
+  td .reason { white-space: normal; max-width: 280px; margin-top: 4px; font-size: 0.78rem; }
+  td a { font-family: var(--mono); font-size: 0.8rem; }
+  .empty { color: var(--text-3); padding: 40px 24px; text-align: center !important; }
+  @media (max-width: 699px) {
+    th:first-child, td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line-soft); }
+    th:first-child { z-index: 2; }
+  }
+
+  /* ---------- wallet health */
+  .panel { background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 18px; }
+  .panel h2 { font-size: 1rem; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 10px; }
+  #health-box { padding: 0; }
+  #health-box summary { display: flex; align-items: center; gap: 10px; padding: 14px 18px; cursor: pointer; list-style: none; border-radius: var(--radius); }
+  #health-box summary::-webkit-details-marker { display: none; }
+  #health-box summary::after {
+    content: ""; margin-left: auto; width: 16px; height: 16px; background: var(--text-3); transition: transform 0.2s var(--ease-out);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+  #health-box[open] summary::after { transform: rotate(180deg); }
+  #health-box summary:hover { background: oklch(0.215 0.008 260); }
+  #health { padding: 4px 18px 16px; border-top: 1px solid var(--line-soft); padding-top: 14px; }
+  .health { display: grid; gap: 8px; font-size: 0.86rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  #health-summary { display: flex; color: var(--text); font-weight: 500; }
+  .health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+  .health .ok .dot { background: var(--pos); box-shadow: 0 0 0 3px oklch(0.79 0.15 158 / 0.18); }
+  .health .warning .dot { background: var(--warn); box-shadow: 0 0 0 3px oklch(0.83 0.13 85 / 0.18); }
+  .health .critical .dot { background: var(--neg); box-shadow: 0 0 0 3px oklch(0.71 0.17 25 / 0.2); }
+  .health .critical { color: var(--neg); }
+
+  /* ---------- dialogs */
+  dialog {
+    background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 18px;
+    width: min(100% - 32px, 460px); max-height: calc(100% - 32px); padding: 24px;
+    box-shadow: 0 24px 40px -24px rgb(0 0 0 / 0.8);
+    opacity: 1; transform: none;
+    transition: opacity 0.22s var(--ease-out), transform 0.3s var(--ease-out), overlay 0.22s allow-discrete, display 0.22s allow-discrete;
+  }
+  @starting-style { dialog[open] { opacity: 0; transform: translateY(10px) scale(0.98); } }
+  dialog::backdrop { background: rgb(4 5 8 / 0.72); backdrop-filter: blur(3px); }
+  dialog h2 { font-size: 1.25rem; font-weight: 650; letter-spacing: -0.02em; }
+  #strategy-form { display: grid; gap: 16px; }
+  #strategy-form input { width: 100%; }
+  #strategy-form .controls { justify-content: flex-end; margin-top: 4px; }
+  #sf-hint { margin: 0; }
+
+  #view-settings { width: min(100% - 32px, 820px); padding: 0; }
+  .dialog-head { position: sticky; top: 0; z-index: 3; display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 18px 28px; background: var(--surface); border-bottom: 1px solid var(--line-soft); }
+  #view-settings .panel {
+    display: grid; grid-template-columns: 220px minmax(0, 1fr); column-gap: 32px; align-items: start;
+    background: none; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; margin: 0; padding: 24px 28px;
+  }
+  #view-settings .panel:last-child { border-bottom: 0; }
+  #view-settings .panel > h2 { grid-column: 1; grid-row: 1 / span 12; font-size: 0.95rem; margin: 9px 0 12px; }
+  #view-settings .panel > :not(h2) { grid-column: 2; margin: 0 0 12px; }
+  #view-settings .panel > :last-child { margin-bottom: 0; }
+  #view-settings p { margin: 0 0 12px; color: var(--text-2); font-size: 0.88rem; }
+  #view-settings p.reason { color: var(--text-3); font-size: 0.82rem; }
+  #settings-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
+  #settings-form input, #report-panel select, #report-panel input { width: 100%; }
+  #settings-form .controls { grid-column: 1 / -1; }
+  #key-input { flex: 1 1 16rem; font-family: var(--mono); font-size: 0.82rem; }
+  #key-form { flex-wrap: wrap; }
+  #sf-dest { font-family: var(--mono); font-size: 0.82rem; }
+  #sf-dest-status { overflow-wrap: anywhere; }
+  #sf-dest-status.pos { color: var(--pos); }
+  #sf-dest-status.danger { color: var(--neg); }
+  .strategy-head + .meta code { font-size: 0.82rem; word-break: break-all; }
+  .wallet-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .wallet-line code { padding: 6px 10px; background: var(--bg); border: 1px solid var(--line-soft); border-radius: 8px; color: var(--text); }
+  #elevation-label { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+  #elevation-label svg.i { width: 16px; height: 16px; }
+  #totp-ready, #totp-setup { margin-bottom: 14px !important; }
+  .qr { background: #fff; padding: 10px; border-radius: 12px; width: 220px; margin: 14px 0; }
+  .qr:empty { display: none; }
+  .qr svg { display: block; width: 200px; height: 200px; }
+
+  @media (max-width: 699px) {
+    body { font-size: 14.5px; }
+    .topbar { margin-bottom: 20px; }
+    .top-actions .label-wide { display: none; }
+    #btn-logout { width: 38px; padding: 0; }
+    .page-head h2 { font-size: 1.5rem; }
+    .strategy-head h2 { font-size: 1.55rem; }
+    .cards { grid-template-columns: 1fr; }
+    .filter .divider { display: none; }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tile .value { font-size: 1.2rem; }
+    dialog { padding: 20px; }
+    #view-settings .panel { grid-template-columns: 1fr; padding: 20px; }
+    #view-settings .panel > h2 { grid-row: auto; margin: 0 0 12px; }
+    #view-settings .panel > :not(h2) { grid-column: 1; }
+    .dialog-head { padding: 14px 14px 14px 20px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition-duration: 0.01ms !important; }
+  }
 </style>
 </head>
 <body>
-  <div class="topbar">
-    <h1>DCA BTC</h1>
+<div class="shell">
+  <header class="topbar">
+    <h1><a href="#" class="brand" aria-label="DCA BTC, home">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><path fill="#f7931a" d="M63.04 39.741c-4.274 17.143-21.638 27.575-38.783 23.301C7.12 58.768-3.313 41.404.962 24.262 5.234 7.117 22.597-3.317 39.737.957c17.144 4.274 27.576 21.64 23.302 38.784z"/><path fill="#fff" d="M46.11 27.441c.636-4.258-2.606-6.547-7.039-8.074l1.438-5.768-3.511-.875-1.4 5.616c-.923-.23-1.871-.447-2.813-.662l1.41-5.653-3.509-.875-1.439 5.766c-.764-.174-1.514-.346-2.242-.527l.004-.018-4.842-1.209-.934 3.75s2.605.597 2.55.634c1.422.355 1.679 1.296 1.636 2.042l-1.638 6.571c.098.025.225.061.365.117l-.371-.092-2.296 9.205c-.174.432-.615 1.08-1.609.834.035.051-2.552-.637-2.552-.637l-1.743 4.019 4.569 1.139c.85.213 1.683.436 2.503.646l-1.453 5.834 3.507.875 1.439-5.772c.958.26 1.888.5 2.798.726l-1.434 5.745 3.511.875 1.453-5.823c5.987 1.133 10.489.676 12.384-4.739 1.527-4.36-.076-6.875-3.226-8.515 2.294-.529 4.022-2.038 4.483-5.155zM38.087 38.69c-1.085 4.36-8.426 2.003-10.806 1.412l1.928-7.729c2.38.594 10.012 1.77 8.878 6.317zm1.086-11.312c-.99 3.966-7.1 1.951-9.082 1.457l1.748-7.01c1.982.494 8.365 1.416 7.334 5.553z"/></svg>
+      DCA <span>BTC</span>
+    </a></h1>
     <div class="controls top-actions" id="top-actions">
-      <a id="lock-indicator" href="#settings" class="reason" title="Authenticator" hidden></a>
-      <a id="btn-settings" href="#settings" class="icon-link" aria-label="Settings" title="Settings">⚙</a>
-      <button id="btn-logout">Log out</button>
+      <a id="lock-indicator" href="#settings" class="pill" title="Authenticator" hidden></a>
+      <a id="btn-settings" href="#settings" class="icon-link" aria-label="Settings" title="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg></a>
+      <button id="btn-logout" class="ghost" aria-label="Log out" title="Log out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg><span class="label-wide">Log out</span></button>
     </div>
-  </div>
+  </header>
 
   <form id="login-form" class="panel" hidden>
     <h2>Log in</h2>
     <p class="reason">Stays logged in on this device for 30 days.</p>
-    <div class="controls">
-      <input id="login-password" type="password" required autocomplete="current-password" placeholder="Password" aria-label="Password">
-      <input id="login-code" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code" style="width:8rem">
-      <button type="submit">Log in</button>
-    </div>
+    <input id="login-password" type="password" required autocomplete="current-password" placeholder="Password" aria-label="Password">
+    <input id="login-code" class="code" inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code">
+    <button type="submit" class="primary">Log in</button>
     <span id="login-msg" class="reason" role="status"></span>
   </form>
 
@@ -180,17 +367,22 @@
   <div id="setup-banner" class="banner"></div>
 
   <div id="view-main">
-  <p id="strategy-back" hidden><a href="#">← All strategies</a></p>
-  <div class="filter" id="strategy-filter" role="group" aria-label="Show strategies">
-    <label><input type="checkbox" value="active" checked> Active</label>
-    <label><input type="checkbox" value="paused"> Paused</label>
-    <label><input type="checkbox" value="completed"> Completed</label>
-    <button type="button" id="btn-new-strategy">+ New strategy</button>
+  <p id="strategy-back" hidden><a href="#" class="back"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>All strategies</a></p>
+  <div class="page-head" id="home-head">
+    <h2>Strategies</h2>
+    <div class="filter" id="strategy-filter" role="group" aria-label="Show strategies">
+      <label class="chip"><input type="checkbox" value="active" checked> Active</label>
+      <label class="chip"><input type="checkbox" value="paused"> Paused</label>
+      <label class="chip"><input type="checkbox" value="completed"> Completed</label>
+      <span class="divider" aria-hidden="true"></span>
+      <button type="button" id="btn-new-strategy" class="primary"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New strategy</button>
+    </div>
   </div>
   <div id="cards" class="cards" aria-label="Strategies"></div>
+  <div id="strategy-head" hidden></div>
   <div id="strategy-bar" class="controls" hidden>
     <button id="btn-buy" class="primary">Buy now</button>
-    <button id="btn-strategy-menu" popovertarget="strategy-menu" aria-label="More strategy actions" title="More actions">⋯</button>
+    <button id="btn-strategy-menu" class="icon" popovertarget="strategy-menu" aria-label="More strategy actions" title="More actions"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
     <div id="strategy-menu" class="menu" popover>
       <button id="btn-strategy-pause">Pause strategy</button>
       <button id="btn-strategy-resume">Resume strategy</button>
@@ -208,10 +400,11 @@
       <label>Label (optional) <input id="sf-label" maxlength="40" placeholder="e.g. August/2026"></label>
       <label>Amount per day (USDT0) <input id="sf-amount" required inputmode="decimal" type="number" min="0.000001" step="0.000001"></label>
       <label>End date (optional, UTC) <input id="sf-end" type="date"></label>
-      <label>Max total (optional, USDT0) — completes when this much is invested <input id="sf-max" inputmode="decimal" type="number" min="0.000001" step="0.000001"></label>
+      <label>Max total (optional, USDT0) <input id="sf-max" inputmode="decimal" type="number" min="0.000001" step="0.000001"><span class="hint">Completes when this much is invested.</span></label>
+      <label>WBTC destination (optional) <input id="sf-dest" autocomplete="off" spellcheck="false" placeholder="0x… checksummed Polygon address" aria-describedby="sf-dest-status"><span id="sf-dest-status" class="hint" role="status" aria-live="polite"></span><span class="hint">Empty = the DCA wallet. The swap delivers the WBTC straight to this address in the same transaction. Strategies bought together in the daily swap must share it; if they differ, that day's WBTC stays in the DCA wallet.</span></label>
       <p id="sf-hint" class="reason"></p>
-      <div class="controls"><button type="submit">Save</button><button type="button" id="sf-cancel">Cancel</button></div>
-      <span id="sf-msg" class="reason" role="status"></span>
+      <span id="sf-msg" class="reason danger" role="status"></span>
+      <div class="controls"><button type="button" id="sf-cancel" class="ghost">Cancel</button><button type="submit" class="primary">Save</button></div>
     </form>
   </dialog>
 
@@ -221,9 +414,10 @@
   </details>
 
   <div id="strategy-detail">
-  <h2 class="section-title">This strategy</h2>
+  <h2 class="section-title">Overview</h2>
   <div class="tiles" id="tiles"></div>
 
+  <h2 class="section-title">History</h2>
   <div class="table-wrap">
     <table>
       <thead>
@@ -246,10 +440,11 @@
   </div>
 
   <dialog id="view-settings" aria-labelledby="settings-title">
-  <div class="topbar"><h2 id="settings-title" class="section-title">Settings</h2><button type="button" id="settings-close" aria-label="Close settings">✕</button></div>
+  <div class="dialog-head"><h2 id="settings-title">Settings</h2><button type="button" id="settings-close" class="ghost icon" aria-label="Close settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
 
   <section class="panel">
-    <h2>Scheduled buying (all strategies)</h2>
+    <h2>Scheduled buying</h2>
+    <p class="reason">Applies to all strategies.</p>
     <div class="controls">
       <button id="btn-pause">Pause all</button>
       <button id="btn-resume">Resume all</button>
@@ -260,35 +455,35 @@
   <section class="panel" id="auth-panel">
     <h2>Authenticator</h2>
     <div id="totp-setup" hidden>
-      <p class="reason">Buying, resuming and strategy changes need a code from Authy or Google Authenticator.</p>
-      <button id="btn-totp-setup">Set up authenticator</button>
+      <p>Buying, resuming and strategy changes need a code from Authy or Google Authenticator.</p>
+      <button id="btn-totp-setup" class="primary">Set up authenticator</button>
       <div id="totp-enrol" hidden>
         <div id="totp-qr" class="qr"></div>
         <p class="reason">Scan the code, or type this key in the app: <code id="totp-secret"></code></p>
         <form id="form-totp-confirm" class="controls">
-          <input id="totp-confirm-code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="width:8rem">
-          <button type="submit">Confirm</button>
+          <input id="totp-confirm-code" class="code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code">
+          <button type="submit" class="primary">Confirm</button>
         </form>
       </div>
     </div>
     <div id="totp-ready" class="controls" hidden>
       <span id="elevation-label"></span>
       <form id="form-unlock" class="controls">
-        <input id="unlock-code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" style="width:8rem">
+        <input id="unlock-code" class="code" required inputmode="numeric" pattern="\d{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code">
         <button type="submit">Unlock</button>
       </form>
       <button id="btn-lock">Lock now</button>
     </div>
     <div class="controls">
       <span id="session-label" class="reason"></span>
-      <button id="btn-logout-all">Log out everywhere</button>
+      <button id="btn-logout-all" class="ghost danger">Log out everywhere</button>
     </div>
     <span id="auth-msg" class="reason" role="status"></span>
   </section>
 
   <section class="panel" id="wallet-panel">
     <h2>Wallet</h2>
-    <p>DCA wallet: <code id="wallet-address">—</code> <a id="wallet-link" target="_blank" rel="noopener noreferrer" hidden>Polygonscan</a></p>
+    <p class="wallet-line">DCA wallet <code id="wallet-address">—</code> <a id="wallet-link" target="_blank" rel="noopener noreferrer" hidden>Polygonscan ↗</a></p>
     <form id="key-form" class="controls">
       <input id="key-input" type="password" autocomplete="off" spellcheck="false" required placeholder="New private key (0x + 64 hex)" aria-label="New private key">
       <button type="submit">Replace key</button>
@@ -298,14 +493,14 @@
   </section>
 
   <section class="panel" id="settings-panel">
-    <h2>Settings (all strategies)</h2>
+    <h2>Trading limits</h2>
     <form id="settings-form">
       <label>Max slippage (%) <input id="st-maxSlippagePct" type="number" inputmode="decimal" required></label>
       <label>Max price impact (%) <input id="st-maxPriceImpactPct" type="number" inputmode="decimal" required></label>
       <label>Max deviation vs Chainlink (%) <input id="st-maxOracleDeviationPct" type="number" inputmode="decimal" required></label>
       <label>Approval days <input id="st-approvalDays" type="number" inputmode="numeric" required></label>
       <label>Min POL balance <input id="st-minPolBalance" type="number" inputmode="decimal" required></label>
-      <div class="controls"><button type="submit">Save settings</button><span id="st-msg" class="reason" role="status"></span></div>
+      <div class="controls"><button type="submit" class="primary">Save settings</button><span id="st-msg" class="reason" role="status"></span></div>
     </form>
   </section>
 
@@ -327,6 +522,7 @@
   </section>
   </dialog>
   </main>
+</div>
 
   <script src="/vendor/qrcode.js"></script>
   <script src="/app.js"></script>

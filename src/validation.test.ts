@@ -38,6 +38,8 @@ import {
   validateSettings,
   isDue,
   SETTINGS_CAPS,
+  parseDestination,
+  resolveRecipient,
 } from "./validation.js";
 import { encodeFunctionData as encodeFn, encodeEventTopics, encodeAbiParameters } from "viem";
 
@@ -986,4 +988,66 @@ test("isDue: at or after today's run time (UTC), never before", () => {
   assert.equal(isDue("2026-09-24T23:45:00.000Z", "00:00"), true);
   assert.equal(isDue("2026-09-24T00:00:00.000Z", "00:00"), true);
   assert.equal(isDue("2026-09-24T23:44:59.000Z", "23:45"), false);
+});
+
+// ============================================================ WBTC destination (F17)
+
+const DEST = "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12";
+const DEST2 = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+const DEST_CTX = { dcaWallet: WALLET, extraForbidden: [USDT0, WBTC] };
+
+test("parseDestination: empty means none (WBTC stays in the DCA wallet)", () => {
+  for (const empty of ["", "   ", null, undefined]) assert.equal(parseDestination(empty, DEST_CTX), null);
+});
+
+test("parseDestination: accepts a checksummed address, trims, returns the canonical form", () => {
+  assert.equal(parseDestination(DEST, DEST_CTX), DEST);
+  assert.equal(parseDestination(`  ${DEST}\n`, DEST_CTX), DEST);
+});
+
+test("parseDestination: requires the EIP-55 checksum -- all-lowercase, all-uppercase and a flipped letter are refused", () => {
+  assertRejects(() => parseDestination(DEST.toLowerCase(), DEST_CTX), "checksum");
+  assertRejects(() => parseDestination("0x" + DEST.slice(2).toUpperCase(), DEST_CTX), "checksum");
+  assertRejects(() => parseDestination(DEST.replace("AB12", "ab12"), DEST_CTX), "checksum");
+});
+
+test("parseDestination: refuses bad shapes", () => {
+  for (const bad of ["0x1234", DEST + "0", DEST.slice(2), "0x" + "g".repeat(40), 42, {}]) assertRejects(() => parseDestination(bad, DEST_CTX), "destination");
+});
+
+test("parseDestination: refuses the DCA wallet itself, the zero address, Permit2, routers, feeds and the traded tokens", () => {
+  assertRejects(() => parseDestination(WALLET, { ...DEST_CTX, dcaWallet: DEST }), "checksum"); // WALLET has no mixed case
+  assertRejects(() => parseDestination(DEST, { ...DEST_CTX, dcaWallet: DEST.toLowerCase() }), "DCA wallet");
+  for (const infra of [
+    "0x000000000022D473030F116dDEE9F6B43aC78BA3", // Permit2
+    "0xDc264714F68d84CF29BC605589405E78bDBE7C9f", // Universal Router 2.1.2
+    "0xc907E116054Ad103354f2D350FD2514433D57F6f", // Chainlink BTC/USD
+    USDT0,
+    WBTC,
+  ]) assertRejects(() => parseDestination(infra, DEST_CTX), "cannot receive");
+});
+
+test("resolveRecipient: no strategies or no destinations -> the DCA wallet", () => {
+  assert.deepEqual(resolveRecipient([], WALLET, DEST_CTX.extraForbidden), { recipient: WALLET, mixed: false });
+  assert.deepEqual(resolveRecipient([null, null], WALLET, DEST_CTX.extraForbidden), { recipient: WALLET, mixed: false });
+});
+
+test("resolveRecipient: one destination shared by every strategy receives the swap", () => {
+  assert.deepEqual(resolveRecipient([DEST], WALLET, DEST_CTX.extraForbidden), { recipient: DEST, mixed: false });
+  assert.deepEqual(resolveRecipient([DEST, DEST], WALLET, DEST_CTX.extraForbidden), { recipient: DEST, mixed: false });
+});
+
+test("resolveRecipient: different destinations (or one set, one not) -> WBTC stays in the DCA wallet, flagged as mixed", () => {
+  assert.deepEqual(resolveRecipient([DEST, DEST2], WALLET, DEST_CTX.extraForbidden), { recipient: WALLET, mixed: true });
+  assert.deepEqual(resolveRecipient([DEST, null], WALLET, DEST_CTX.extraForbidden), { recipient: WALLET, mixed: true });
+});
+
+test("resolveRecipient: a destination equal to the (replaced) DCA wallet counts as the wallet", () => {
+  const wallet = DEST.toLowerCase() as `0x${string}`;
+  assert.deepEqual(resolveRecipient([DEST, null], wallet, []), { recipient: DEST, mixed: false });
+});
+
+test("resolveRecipient: a corrupt stored destination fails closed (no buy) instead of guessing", () => {
+  assertRejects(() => resolveRecipient([DEST.toLowerCase()], WALLET, []), "checksum");
+  assertRejects(() => resolveRecipient([DEST, WBTC], WALLET, [WBTC]), "cannot receive");
 });

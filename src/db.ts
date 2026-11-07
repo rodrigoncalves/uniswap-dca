@@ -49,7 +49,7 @@ export interface Run {
   createdAt?: string;
 }
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 const COLUMNS: { camel: keyof Run; snake: string }[] = [
   { camel: "wallet", snake: "wallet" },
@@ -202,6 +202,8 @@ function migrate(db: DatabaseSync): void {
   if (version < 9) db.exec("UPDATE strategies SET status = 'completed' WHERE status = 'stopped'");
   // v10: low-funds alert threshold, in days (0 = only when a run can't be paid).
   if (version < 10 && !(db.prepare("PRAGMA table_info(report_pref)").all() as { name: string }[]).some((c) => c.name === "alert_days")) db.exec("ALTER TABLE report_pref ADD COLUMN alert_days INTEGER NOT NULL DEFAULT 2 CHECK (alert_days BETWEEN 0 AND 30)");
+  // v11: optional WBTC destination per strategy (F17, DECISIONS.md #33). NULL = the DCA wallet.
+  if (version < 11 && !(db.prepare("PRAGMA table_info(strategies)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE strategies ADD COLUMN destination TEXT");
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   db.exec("COMMIT");
   } catch (err) {
@@ -490,6 +492,7 @@ export interface Strategy {
   maxTotal: string | null;
   createdAt: string;
   stoppedAt: string | null;
+  destination: string | null; // F17: WBTC destination, NULL = the DCA wallet
 }
 
 export interface RunShare {
@@ -512,6 +515,7 @@ function rowToStrategy(row: Record<string, unknown>): Strategy {
     maxTotal: (row.max_total as string | null) ?? null,
     createdAt: row.created_at as string,
     stoppedAt: (row.stopped_at as string | null) ?? null,
+    destination: (row.destination as string | null) ?? null,
   };
 }
 
@@ -842,6 +846,17 @@ export function saveSettings(db: DatabaseSync, s: Settings, nowIso: string): voi
        max_price_impact_pct = excluded.max_price_impact_pct, max_oracle_deviation_pct = excluded.max_oracle_deviation_pct,
        approval_days = excluded.approval_days, min_pol_balance = excluded.min_pol_balance, updated_at = excluded.updated_at`
   ).run(s.runTime, s.maxSlippagePct, s.maxPriceImpactPct, s.maxOracleDeviationPct, s.approvalDays, s.minPolBalance, nowIso);
+}
+
+// ============================================================
+// WBTC destination per strategy (F17) -- validated by validation.ts
+// parseDestination before it gets here and re-validated on every run
+// (resolveRecipient). DECISIONS.md #33.
+// ============================================================
+
+export function setStrategyDestination(db: DatabaseSync, id: number, address: string | null): void {
+  const result = db.prepare("UPDATE strategies SET destination = ? WHERE id = ?").run(address, id);
+  if (result.changes !== 1) throw new Error(`strategy #${id} not found`);
 }
 
 // ============================================================

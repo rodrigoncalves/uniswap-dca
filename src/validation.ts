@@ -10,9 +10,9 @@
 // env -- README.md invariant #5 ("limits... live in code"). See the comment on each
 // one for the reasoning behind its value.
 
-import { getAddress, decodeFunctionData, parseEventLogs } from "viem";
+import { getAddress, isAddress, decodeFunctionData, parseEventLogs } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { PERMIT2_ADDRESS } from "./tokens.js";
+import { PERMIT2_ADDRESS, UNIVERSAL_ROUTERS, CHAINLINK_FEEDS } from "./tokens.js";
 
 export class ValidationError extends Error {
   constructor(problems: string[]) {
@@ -970,6 +970,71 @@ export function validateSettings(raw: Record<string, unknown>): Settings {
 /** True once today's run time (UTC) has arrived. The daily lock stops a second buy later in the day. */
 export function isDue(nowIso: string, runTime: string): boolean {
   return nowIso.slice(11, 16) >= runTime;
+}
+
+// ============================================================
+// WBTC destination (F17, DECISIONS.md #33) -- optional, per strategy. The
+// swap's recipient goes in the quote's `recipient`, so the Universal Router
+// delivers the WBTC inside the swap transaction itself (no second transfer).
+// A scheduled swap serves every active strategy at once and has ONE
+// recipient: it uses a destination only when all of that swap's strategies
+// share it; otherwise the WBTC stays in the DCA wallet that day.
+// ============================================================
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+/** Contracts the bot talks to: WBTC sent to any of them is gone. */
+const INFRA_ADDRESSES: readonly string[] = [ZERO_ADDRESS, PERMIT2_ADDRESS, ...UNIVERSAL_ROUTERS, ...Object.values(CHAINLINK_FEEDS)];
+
+/**
+ * The address typed in the app (or read back from the database). Empty ->
+ * null (WBTC stays in the DCA wallet). Requires the EIP-55 checksum the way
+ * DECISIONS.md #4 (addendum) says it really works: shape, then mixed case
+ * (an all-lowercase value always passes isAddress strict), then isAddress strict.
+ */
+export function parseDestination(
+  raw: unknown,
+  ctx: { dcaWallet: string | null; extraForbidden: readonly string[] }
+): `0x${string}` | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string") fail(["destination: must be an address string"]);
+  const value = raw.trim();
+  if (value === "") return null;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) fail([`destination: "${value}" is not an address (0x + 40 hex characters)`]);
+  const hex = value.slice(2);
+  if (hex === hex.toLowerCase() || hex === hex.toUpperCase() || !isAddress(value, { strict: true })) {
+    fail([`destination: "${value}" fails the EIP-55 checksum -- paste the mixed-case address exactly as your wallet shows it`]);
+  }
+  const address = getAddress(value);
+  if (ctx.dcaWallet !== null && addressEquals(address, ctx.dcaWallet)) {
+    fail(["destination: that is the DCA wallet itself -- leave the field empty to keep the WBTC there"]);
+  }
+  if ([...INFRA_ADDRESSES, ...ctx.extraForbidden].some((a) => addressEquals(a, address))) {
+    fail([`destination: ${address} is a token or protocol contract and cannot receive the WBTC`]);
+  }
+  return address;
+}
+
+/**
+ * Who receives this swap's WBTC, given the destination of each strategy in
+ * it (null = none). Re-validates every stored value on every run (like
+ * loadSettings): a corrupt or forbidden one throws -- no buy -- instead of
+ * falling back to a guess. `mixed` = the strategies disagree, so the WBTC
+ * stays in the DCA wallet.
+ */
+export function resolveRecipient(
+  destinations: readonly (string | null)[],
+  wallet: `0x${string}`,
+  extraForbidden: readonly string[]
+): { recipient: `0x${string}`; mixed: boolean } {
+  const self = getAddress(wallet);
+  const targets = new Set(
+    destinations.map((d) => {
+      const address = parseDestination(d, { dcaWallet: null, extraForbidden });
+      return address === null || address === self ? self : address;
+    })
+  );
+  if (targets.size <= 1) return { recipient: targets.size === 1 ? [...targets][0]! : wallet, mixed: false };
+  return { recipient: wallet, mixed: true };
 }
 
 // ============================================================

@@ -151,6 +151,34 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
     assert.equal((await request("/api/report", "POST", { alertDays: 4 })).status, 200, "alert days need no TOTP");
     const stored = await request("/api/settings").then((r) => r.json()) as { reportMode: string; alertDays: number };
     assert.deepEqual([stored.reportMode, stored.alertDays], ["errors", 4], "days stored, mode kept");
+    // F17: WBTC destination per strategy -- TOTP, checksum, not the DCA wallet, immediate, empty clears
+    const destination = "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12";
+    type StrategiesState = { strategies: { id: number; destination: string | null }[] };
+    const destOf = async (id: number) => ((await request("/api/strategies").then((r) => r.json())) as StrategiesState).strategies.find((st) => st.id === id)!.destination;
+    assert.equal(await destOf(1), null, "no destination by default");
+    // live field check: same validation, read-only, no TOTP, never saves
+    type Check = { ok: boolean; address?: string | null; error?: string };
+    const check = async (value: string) => (await (await request("/api/destination/check", "POST", { destination: value })).json()) as Check;
+    assert.deepEqual(await check(destination), { ok: true, address: destination });
+    assert.deepEqual(await check(""), { ok: true, address: null }, "empty = the DCA wallet");
+    assert.match((await check(destination.toLowerCase())).error!, /checksum/);
+    assert.match((await check(parsePrivateKey(replacementKey).address)).error!, /DCA wallet/);
+    assert.match((await check("0x1234")).error!, /not an address/);
+    assert.equal(await destOf(1), null, "checking saves nothing");
+    assert.equal((await request("/api/strategies/1/destination", "POST", { destination })).status, 403, "destination needs TOTP");
+    response = await request("/api/strategies/1/destination", "POST", { destination: destination.toLowerCase() }, { Cookie: cookie });
+    assert.equal(response.status, 400, "checksum required");
+    assert.match((await response.json() as { error: string }).error, /checksum/);
+    response = await request("/api/strategies/1/destination", "POST", { destination: parsePrivateKey(replacementKey).address }, { Cookie: cookie });
+    assert.equal(response.status, 400, "the DCA wallet itself is refused");
+    assert.equal((await request("/api/strategies/99/destination", "POST", { destination }, { Cookie: cookie })).status, 404);
+    response = await request("/api/strategies/1/destination", "POST", { destination }, { Cookie: cookie });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { destination: string }).destination, destination);
+    assert.equal(await destOf(1), destination, "takes effect immediately");
+    assert.equal(await destOf(2), null, "other strategies untouched");
+    assert.equal((await request("/api/strategies/1/destination", "POST", { destination: "" }, { Cookie: cookie })).status, 200);
+    assert.equal(await destOf(1), null, "empty clears it");
     assert.equal((await request("/api/pause", "POST", {})).status, 200, "pause needs no TOTP");
     response = await request("/api/resume", "POST", {});
     assert.equal(response.status, 403, "resume needs TOTP");

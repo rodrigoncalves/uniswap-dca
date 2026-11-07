@@ -30,7 +30,7 @@ import { loadConfig, loadMasterKey, type Config } from "./config.js";
 import {
   openDb, getRun, updateRun, isPaused, listRuns, setPaused, updateManualRun, listManualRuns, listAllRuns,
   claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, getStrategy, activeAmounts, completeReachedStrategies, manualBuyUnits,
-  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, type Run, type RunPatch,
+  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, listStrategies, type Run, type RunPatch,
 } from "./db.js";
 import { seedSettingsAndStrategyFromEnv, seedPrivateKeyFromEnv, loadSettings, loadPrivateKey, assertPrivateKeyUnchanged, settingsFromEnv, SetupError } from "./setup.js";
 import {
@@ -79,6 +79,7 @@ import {
   RECOVERY_GRACE_SECONDS,
   type ReceiptLog,
   parsePrivateKey,
+  resolveRecipient,
 } from "./validation.js";
 import { UNIVERSAL_ROUTERS, CHAINLINK_FEEDS, PERMIT2_ADDRESS } from "./tokens.js";
 import { logger, registerSecret } from "./logger.js";
@@ -118,6 +119,11 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Each strategy's WBTC destination (null = none), for resolveRecipient. */
+function destinationsOf(db: DatabaseSync, strategyIds: number[]): (string | null)[] {
+  return strategyIds.map((id) => getStrategy(db, id)?.destination ?? null);
+}
+
 /** Today's total of strategies that would buy, for the approve cap. */
 function dailyAmountFor(db: DatabaseSync, today: string, amount: string): string {
   const amounts = activeAmounts(db, today);
@@ -130,7 +136,7 @@ function dailyAmountFor(db: DatabaseSync, today: string, amount: string): string
  * assertion in validation.ts. Does NOT touch db.runs -- the caller decides
  * what to persist. Throws on any failure (fail closed).
  */
-async function runVerifiedFlow(config: Config, settings: Settings, client: Client, account: Account, amount: string, dailyAmount: string) {
+async function runVerifiedFlow(config: Config, settings: Settings, client: Client, account: Account, amount: string, dailyAmount: string, destinations: (string | null)[]) {
   const chainId = await getChainId(client);
   if (chainId !== 137) throw new Error(`unexpected chainId: ${chainId} (expected 137)`);
 
@@ -176,8 +182,12 @@ async function runVerifiedFlow(config: Config, settings: Settings, client: Clien
     });
   }
 
-  // WBTC always stays in the DCA wallet (OUTPUT_RECIPIENT removed, DECISIONS.md #23).
-  const recipient = account.address;
+  // Optional destination per strategy (F17, DECISIONS.md #33): the quote's
+  // `recipient`, so the Universal Router delivers the WBTC to it inside the
+  // swap tx itself. One swap has one recipient: strategies that disagree
+  // leave the WBTC in the DCA wallet. Re-validated here on every run.
+  const { recipient, mixed } = resolveRecipient(destinations, account.address, [config.tokenIn, config.tokenOut]);
+  if (mixed) logger.warn("strategies in this swap have different WBTC destinations -- this purchase stays in the DCA wallet");
 
   const quoteResponse: QuoteResponse = await getQuote(config.uniswapApiKey, {
     type: "EXACT_INPUT",
@@ -190,6 +200,7 @@ async function runVerifiedFlow(config: Config, settings: Settings, client: Clien
     slippageTolerance: settings.maxSlippagePct,
     routingPreference: "BEST_PRICE",
     permitAmount: "EXACT",
+    ...(recipient !== account.address ? { recipient } : {}),
   });
 
   assertQuote(
@@ -473,7 +484,7 @@ async function recoverPreviousDays(db: DatabaseSync, config: Config, client: Cli
 // execution
 // ============================================================
 
-async function dryRun(config: Config, settings: Settings, db: DatabaseSync, client: Client, account: Account, date: string, amount: string): Promise<void> {
+async function dryRun(config: Config, settings: Settings, db: DatabaseSync, client: Client, account: Account, date: string, amount: string, strategyIds: number[]): Promise<void> {
   // Read-only on purpose -- see the comment at the top of the file.
   const existing = getRun(db, account.address, date);
   if (existing) console.log(`(info) a record already exists for today: status=${existing.status}`);
@@ -481,14 +492,14 @@ async function dryRun(config: Config, settings: Settings, db: DatabaseSync, clie
     console.log("(info) DCA is paused -- the real run would exit without buying");
   }
 
-  const r = await runVerifiedFlow(config, settings, client, account, amount, dailyAmountFor(db, date, amount));
+  const r = await runVerifiedFlow(config, settings, client, account, amount, dailyAmountFor(db, date, amount), destinationsOf(db, strategyIds));
   console.log(`=== DRY RUN${MANUAL ? " (manual buy)" : ""} -- nothing was broadcast ===`);
   console.log(`run time: ${settings.runTime} UTC`);
   console.log(`amount: ${amount} ${config.tokenInSymbol}`);
   console.log("routing:", r.quoteResponse.routing);
   console.log("route:", r.quoteResponse.quote.routeString);
   console.log("to (Universal Router):", r.swapResponse.swap.to);
-  console.log("WBTC destination:", r.recipient);
+  console.log("WBTC destination:", r.recipient, r.recipient === account.address ? "(DCA wallet)" : "(external wallet, delivered in the swap tx)");
   console.log(`price (worst case): ${r.impliedPrice.toFixed(2)} ${config.tokenInSymbol}/BTC`);
   console.log(`oracle price:       ${r.oraclePrice.toFixed(2)} ${config.tokenInSymbol}/BTC`);
   console.log(`deviation: ${r.deviationPct.toFixed(3)}%`);
@@ -530,7 +541,7 @@ async function realRun(config: Config, db: DatabaseSync, client: Client, account
       return;
     }
     logger.info("scheduled buy", { date, total: totalHuman, strategies: claim.shares.map((s) => s.strategyId) });
-    await execute(config, db, client, account, totalHuman, totalHuman, { wallet: account.address, date });
+    await execute(config, db, client, account, totalHuman, totalHuman, { wallet: account.address, date }, claim.shares.map((s) => s.strategyId));
   }
   await emailReport(config, db, account.address, date);
   await emailFundsAlert(config, db, client, account);
@@ -612,7 +623,7 @@ async function manualRun(config: Config, db: DatabaseSync, client: Client, accou
   }
   const { id: manualId, amount } = claim;
   logger.info("manual buy", { id: manualId, strategy: strategyId, amount });
-  await execute(config, db, client, account, amount, dailyAmount, { wallet: account.address, date, manualId });
+  await execute(config, db, client, account, amount, dailyAmount, { wallet: account.address, date, manualId }, [strategyId]);
 }
 
 /** The buy itself, shared by the daily and the manual run: the row already exists as PENDING. */
@@ -623,12 +634,13 @@ async function execute(
   account: Account,
   amount: string,
   dailyAmount: string,
-  key: Pick<Run, "wallet" | "date" | "manualId">
+  key: Pick<Run, "wallet" | "date" | "manualId">,
+  strategyIds: number[]
 ): Promise<void> {
   const save = saver(db, key);
   let signed: Awaited<ReturnType<typeof signTx>>;
   try {
-    const r = await runVerifiedFlow(config, loadSettings(db), client, account, amount, dailyAmount);
+    const r = await runVerifiedFlow(config, loadSettings(db), client, account, amount, dailyAmount, destinationsOf(db, strategyIds));
     save({
       amountIn: r.dcaAmountBaseUnits.toString(),
       recipient: r.recipient,
@@ -729,13 +741,15 @@ async function main(): Promise<void> {
         if (!strategy) throw new Error(`strategy #${strategyId} not found`);
         const units = manualBuyUnits(db, strategy, AMOUNT_DECIMALS);
         if (units <= 0n) throw new Error(`strategy #${strategyId} has nothing left of its max total`);
-        await dryRun(config, settings, db, client, account, today, formatUnits(units, AMOUNT_DECIMALS));
+        await dryRun(config, settings, db, client, account, today, formatUnits(units, AMOUNT_DECIMALS), [strategyId]);
       } else await manualRun(config, db, client, account, today, strategyId, assertCurrentSigner);
     } else {
       const amounts = activeAmounts(db, today);
       if (DRY_RUN) {
+        // Same filter as activeAmounts: the strategies today's swap would serve.
+        const ids = listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= today)).map((s) => s.id);
         if (amounts.length === 0) console.log("(info) no active strategy -- the real run would buy nothing");
-        else await dryRun(config, settings, db, client, account, today, formatUnits(assertRunTotal(amounts), AMOUNT_DECIMALS));
+        else await dryRun(config, settings, db, client, account, today, formatUnits(assertRunTotal(amounts), AMOUNT_DECIMALS), ids);
       } else await realRun(config, db, client, account, today, assertCurrentSigner);
     }
   } finally {
