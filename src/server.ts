@@ -130,6 +130,9 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   "/icons/icon-512.png": { file: "icons/icon-512.png", type: "image/png" },
   "/icons/icon-maskable-512.png": { file: "icons/icon-maskable-512.png", type: "image/png" },
   "/icons/apple-touch-icon.png": { file: "icons/apple-touch-icon.png", type: "image/png" },
+  "/fonts/inter.woff2": { file: "fonts/inter.woff2", type: "font/woff2" },
+  "/fonts/jetbrains-mono.woff2": { file: "fonts/jetbrains-mono.woff2", type: "font/woff2" },
+  "/fonts/OFL.txt": { file: "fonts/OFL.txt", type: "text/plain; charset=utf-8" },
 };
 
 const CSP =

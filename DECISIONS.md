@@ -595,3 +595,14 @@ General lesson: a security-policy value that's "reasonable in your head" (README
 
 **Trade-off.** If the scheduler never runs, no alert either (the watchdog stays deferred). A wallet that empties between runs, such as after a manual buy, is reported after the next scheduled run.
 
+## #32 — Self-hosted web fonts for the app
+
+**Date:** 2026-10-11
+**Status:** accepted — F16
+
+**Decision.** The app ships Inter (UI) and JetBrains Mono (addresses, hashes, codes) as variable `woff2` files in `public/fonts/`, served by `server.ts` like the other static files and cached by the service worker shell. Licence: SIL OFL 1.1, text in `public/fonts/OFL.txt` (served at `/fonts/OFL.txt`).
+
+**Why.** The redesign needed a sharper type voice and tabular figures than the platform fonts give everywhere. A CDN (Google Fonts) would break the no-CDN rule for the browser and leak each visit to a third party; self-hosting keeps the CSP unchanged (`default-src 'self'` already covers fonts). Assets, not a code dependency: nothing added to `package.json`.
+
+**Trade-off.** ~450 KB more in the first load and the offline cache; `font-display: swap` keeps text visible meanwhile.
+
