@@ -156,6 +156,15 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
     type StrategiesState = { strategies: { id: number; destination: string | null }[] };
     const destOf = async (id: number) => ((await request("/api/strategies").then((r) => r.json())) as StrategiesState).strategies.find((st) => st.id === id)!.destination;
     assert.equal(await destOf(1), null, "no destination by default");
+    // live field check: same validation, read-only, no TOTP, never saves
+    type Check = { ok: boolean; address?: string | null; error?: string };
+    const check = async (value: string) => (await (await request("/api/destination/check", "POST", { destination: value })).json()) as Check;
+    assert.deepEqual(await check(destination), { ok: true, address: destination });
+    assert.deepEqual(await check(""), { ok: true, address: null }, "empty = the DCA wallet");
+    assert.match((await check(destination.toLowerCase())).error!, /checksum/);
+    assert.match((await check(parsePrivateKey(replacementKey).address)).error!, /DCA wallet/);
+    assert.match((await check("0x1234")).error!, /not an address/);
+    assert.equal(await destOf(1), null, "checking saves nothing");
     assert.equal((await request("/api/strategies/1/destination", "POST", { destination })).status, 403, "destination needs TOTP");
     response = await request("/api/strategies/1/destination", "POST", { destination: destination.toLowerCase() }, { Cookie: cookie });
     assert.equal(response.status, 400, "checksum required");

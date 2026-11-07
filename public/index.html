@@ -302,6 +302,9 @@
   #key-input { flex: 1 1 16rem; font-family: var(--mono); font-size: 0.82rem; }
   #key-form { flex-wrap: wrap; }
   #sf-dest { font-family: var(--mono); font-size: 0.82rem; }
+  #sf-dest-status { overflow-wrap: anywhere; }
+  #sf-dest-status.pos { color: var(--pos); }
+  #sf-dest-status.danger { color: var(--neg); }
   .strategy-head + .meta code { font-size: 0.82rem; word-break: break-all; }
   .wallet-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
   .wallet-line code { padding: 6px 10px; background: var(--bg); border: 1px solid var(--line-soft); border-radius: 8px; color: var(--text); }
@@ -398,7 +401,7 @@
       <label>Amount per day (USDT0) <input id="sf-amount" required inputmode="decimal" type="number" min="0.000001" step="0.000001"></label>
       <label>End date (optional, UTC) <input id="sf-end" type="date"></label>
       <label>Max total (optional, USDT0) <input id="sf-max" inputmode="decimal" type="number" min="0.000001" step="0.000001"><span class="hint">Completes when this much is invested.</span></label>
-      <label>WBTC destination (optional) <input id="sf-dest" autocomplete="off" spellcheck="false" placeholder="0x… checksummed Polygon address"><span class="hint">Empty = the DCA wallet. The swap delivers the WBTC straight to this address in the same transaction. Strategies bought together in the daily swap must share it; if they differ, that day's WBTC stays in the DCA wallet.</span></label>
+      <label>WBTC destination (optional) <input id="sf-dest" autocomplete="off" spellcheck="false" placeholder="0x… checksummed Polygon address" aria-describedby="sf-dest-status"><span id="sf-dest-status" class="hint" role="status" aria-live="polite"></span><span class="hint">Empty = the DCA wallet. The swap delivers the WBTC straight to this address in the same transaction. Strategies bought together in the daily swap must share it; if they differ, that day's WBTC stays in the DCA wallet.</span></label>
       <p id="sf-hint" class="reason"></p>
       <span id="sf-msg" class="reason danger" role="status"></span>
       <div class="controls"><button type="button" id="sf-cancel" class="ghost">Cancel</button><button type="submit" class="primary">Save</button></div>

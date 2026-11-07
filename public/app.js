@@ -421,6 +421,7 @@ function openStrategyDialog(s) {
   end.min = end.value && end.value < tomorrow ? end.value : tomorrow;
   document.getElementById("sf-max").value = s?.maxTotal ?? "";
   document.getElementById("sf-dest").value = s?.destination ?? "";
+  checkDestination();
   const room = Number(maxRunTotal) - Number(dailyTotal) + (s?.status === "active" ? Number(s.amount) : 0);
   amount.max = String(Math.max(0, Math.min(Number(maxRunTotal), room)));
   document.getElementById("sf-hint").textContent = `Daily total of active strategies: ${dailyTotal} of ${maxRunTotal} USDT0 per run.`;
@@ -429,6 +430,50 @@ function openStrategyDialog(s) {
   amount.focus();
 }
 
+// F17: live checksum check of the destination field. The rules live on the
+// server (validation.ts parseDestination); the browser only shows the verdict
+// and blocks Save while it's invalid. No auto-fix of the casing: correcting
+// it here would defeat the checksum.
+const destInput = document.getElementById("sf-dest");
+const destStatus = document.getElementById("sf-dest-status");
+let destCheck = Promise.resolve();
+let destSeq = 0;
+let destTimer = null;
+
+function checkDestination() {
+  clearTimeout(destTimer);
+  destTimer = null;
+  const value = destInput.value.trim();
+  const seq = ++destSeq;
+  if (!value) {
+    destInput.setCustomValidity("");
+    destStatus.className = "hint";
+    destStatus.textContent = "";
+    destCheck = Promise.resolve();
+    return destCheck;
+  }
+  destInput.setCustomValidity("checking…"); // Save waits for the verdict
+  destStatus.className = "hint";
+  destStatus.textContent = "Checking…";
+  destCheck = api("/api/destination/check", { destination: value })
+    .then((res) => (res.ok ? res.json() : { ok: false, error: `check failed (${res.status})` }))
+    .catch(() => ({ ok: false, error: "check failed -- connection" }))
+    .then((r) => {
+      if (seq !== destSeq) return; // a newer keystroke owns the field
+      // the field already shows the value -- drop the server's echo of it
+      const error = r.ok ? "" : r.error.replace(/^destination: /, "").replace(/^"[^"]*" is not/, "not").replace(/^"[^"]*" /, "").replace(/^./, (c) => c.toUpperCase());
+      destInput.setCustomValidity(error);
+      destStatus.className = `hint ${r.ok ? "pos" : "danger"}`;
+      destStatus.textContent = r.ok ? `✓ Valid checksum: ${r.address}` : `✗ ${error}`;
+    });
+  return destCheck;
+}
+
+destInput.addEventListener("input", () => {
+  clearTimeout(destTimer);
+  destTimer = setTimeout(checkDestination, 250);
+});
+
 // click anywhere on the date field opens the calendar, not just the small icon
 document.getElementById("sf-end").addEventListener("click", (event) => {
   try { event.target.showPicker(); } catch { /* older browsers: the icon still opens it */ }
@@ -436,6 +481,8 @@ document.getElementById("sf-end").addEventListener("click", (event) => {
 document.getElementById("sf-cancel").addEventListener("click", () => dialog.close());
 document.getElementById("strategy-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (destTimer !== null) await checkDestination(); // typed and saved within the debounce
+  await destCheck;
   if (!event.target.reportValidity()) return;
   const body = {
     label: document.getElementById("sf-label").value,

@@ -744,6 +744,21 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // Live check for the destination field: the same parseDestination as the
+  // save route, read-only (session + CSRF, no TOTP), so the browser never
+  // carries its own copy of the rules or a keccak implementation.
+  if (req.method === "POST" && url.pathname === "/api/destination/check") {
+    postJson(req, res, (body) => {
+      try {
+        const address = parseDestination(body.destination, { dcaWallet: walletAddress(), extraForbidden: rpc ? [rpc.tokenIn, rpc.tokenOut] : [] });
+        sendJson(res, 200, { ok: true, address });
+      } catch (err) {
+        sendJson(res, 200, { ok: false, error: err instanceof ValidationError ? err.message.replace(/^.*\n\s*- /s, "") : "invalid destination" });
+      }
+    });
+    return;
+  }
+
   // F17: optional WBTC destination per strategy (DECISIONS.md #33). TOTP like
   // the key; takes effect from the next purchase and every change is emailed.
   // Empty clears it.
