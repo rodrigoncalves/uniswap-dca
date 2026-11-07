@@ -2,7 +2,7 @@
 // app opens offline. Never /api/*, login or any authenticated response --
 // balances and history must always come from the server (invariant 6).
 // Bump CACHE when a shell file changes shape; old caches are dropped on activate.
-const CACHE = "dca-shell-v3";
+const CACHE = "dca-shell-v4";
 const SHELL = ["/", "/app.js", "/vendor/qrcode.js", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png", "/icons/icon-maskable-512.png", "/icons/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
