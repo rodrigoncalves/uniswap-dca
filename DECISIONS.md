@@ -87,7 +87,7 @@ Non-zero → non-zero transition accepted. The legacy guard doesn't exist in thi
 ## #4 — BTC destination via the `/quote` `recipient` field
 
 **Date:** 2026-09-22
-**Status:** superseded by #23 (OUTPUT_RECIPIENT removed, 2026-09-26)
+**Status:** superseded by #23 (OUTPUT_RECIPIENT removed, 2026-09-26); the mechanism returns in #33 (destination set in the app)
 
 **Context.** The purchased BTC doesn't need to stay in the hot wallet. The obvious alternative would be a `transfer` after the swap — one more transaction, more gas, and a window in which the BTC sits in the hot wallet.
 
@@ -487,7 +487,7 @@ General lesson: a security-policy value that's "reasonable in your head" (README
 ## #23 — Settings in the database, hard caps in code, 15-minute cron gate
 
 **Date:** 2026-09-26
-**Status:** accepted — supersedes #4; addendum to #12
+**Status:** accepted — supersedes #4; addendum to #12. The `OUTPUT_RECIPIENT` removal is partly reversed by #33
 
 **Decision.**
 - Shared settings (run time, slippage, price impact, oracle deviation, approval days, min POL balance) live in a single `settings` row (schema v7), edited in the app behind TOTP (#19, #21). Seeded once from the old env vars (all five or none; a partial set or an out-of-cap value refuses to run). A dry-run reads them from the env without writing, like it never seeds strategies.
@@ -606,3 +606,18 @@ General lesson: a security-policy value that's "reasonable in your head" (README
 
 **Trade-off.** ~450 KB more in the first load and the offline cache; `font-display: swap` keeps text visible meanwhile.
 
+## #33 — Optional WBTC destination per strategy, delivered in the swap transaction
+
+**Date:** 2026-10-15
+**Status:** accepted — F17; reverses the destination part of #23, reuses the mechanism of #4
+
+**Context.** The user asked for an optional field to send the purchased BTC to another wallet, and whether it can all happen in the same block. They then asked for it to be per strategy and to take effect immediately. #23 had removed `OUTPUT_RECIPIENT` because a changeable destination is the one setting that turns a stolen app login into theft. Since then, TOTP has gated every dangerous action (#19, #21), and the key is replaced only behind TOTP (#25).
+
+**Decision.**
+- **Same transaction, not just the same block.** The quote's `recipient` field (#4) makes the Universal Router deliver the WBTC to the destination inside the swap transaction. No second `transfer` is sent, no extra gas is paid, and the DCA wallet never holds that WBTC. The existing checks already cover it: `assertQuote` compares the echoed recipient, and the pre-broadcast simulation and the receipt check (`assertOutputTransfer`) require the WBTC to reach exactly that address. Any WBTC Transfer to another address, including the DCA wallet, fails the run and pauses.
+- **Per strategy.** `strategies.destination` (schema v11, NULL = the DCA wallet) is set with `POST /api/strategies/:id/destination` behind TOTP, from the strategy's create/edit dialog. A non-empty `OUTPUT_RECIPIENT` in env is still refused, and its error points to the app.
+- **One swap, one recipient (user's choice, 2026-10-15).** The scheduled run sums every active strategy into one swap (invariant 2), and the API takes a single `recipient`. `validation.ts::resolveRecipient` uses a destination only when all of the swap's strategies share it. If they differ (two addresses, or one set and one not), the WBTC stays in the DCA wallet that day; the run logs a warning, and the strategy page and `npm run check` show it. A manual buy has one strategy, so it always uses that strategy's destination. Considered and not chosen: one swap per destination (changes the daily lock and recovery) and a swap followed by per-strategy transfers (not atomic, and needs a second recovery path).
+- **Immediate effect (user's choice).** A change applies from the next purchase. There is no delay; the safeguards are TOTP, a confirmation dialog, a log line and an email on every change (when Resend is configured). Each run stores its own `recipient`, so a change never affects a purchase already in progress, and recovery checks the address that run used.
+- **Strict input (`parseDestination`).** It requires the EIP-55 checksum (shape, then mixed case, then `isAddress` strict; #4 addendum). It refuses the DCA wallet itself, the zero address, Permit2, the routers, the Chainlink feeds and the traded tokens. `resolveRecipient` checks the stored values again on every run, and a corrupt value fails the run without buying (invariant 6).
+
+**Trade-off.** With immediate effect, a stolen password plus TOTP can redirect the next purchase; the email is the only warning, and it may arrive after the purchase. The checksum catches case errors, not a wrong but well-formed address (#4 addendum). Strategy totals come from the database, so they are unchanged; the wallet-health panel only shows the DCA wallet's USDT0/POL. Fork scenarios: `destination`, `destination_mixed`, `destination_manual`, `destination_bad`.

@@ -55,7 +55,7 @@ export function seedFromEnv(db: DatabaseSync, env: Env, nowIso: string, masterKe
 
 export function seedSettingsAndStrategyFromEnv(db: DatabaseSync, env: Env, nowIso: string): void {
   if (env.OUTPUT_RECIPIENT?.trim()) {
-    throw new ValidationError(["OUTPUT_RECIPIENT is no longer supported (DECISIONS.md #23): WBTC stays in the DCA wallet. Remove it from the environment."]);
+    throw new ValidationError(["OUTPUT_RECIPIENT is no longer read from the environment (DECISIONS.md #23, #33): set the WBTC destination in the app (Settings -> WBTC destination, behind TOTP). Remove it from the environment."]);
   }
   seedSettings(db, env, nowIso);
   seedStrategy(db, env, nowIso);

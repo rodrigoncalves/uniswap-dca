@@ -205,14 +205,25 @@
       if (s.maxTotal) items.push(["Max total", `${s.maxTotal} USDT0`]);
       if (s.endDate) items.push(["Ends", fmtDate(s.endDate)]);
       if (s.stoppedAt) items.push(["Completed", fmtDate(s.stoppedAt)]);
+      items.push(["WBTC to", s.destination ?? "DCA wallet"]);
       for (const [k, v] of items) {
         const span = document.createElement("span");
-        const b = document.createElement("b");
+        const b = document.createElement(v === s.destination ? "code" : "b");
         b.textContent = v;
         span.append(`${k} `, b);
         meta.appendChild(span);
       }
-      document.getElementById("strategy-head").replaceChildren(head, meta);
+      const parts = [head, meta];
+      // F17: one daily swap, one recipient -- active strategies must share a destination
+      const today = new Date().toISOString().slice(0, 10);
+      const active = strategies.filter((x) => x.status === "active" && (!x.endDate || x.endDate >= today));
+      if (s.status === "active" && new Set(active.map((x) => x.destination ?? "")).size > 1) {
+        const warn = document.createElement("p");
+        warn.className = "reason danger";
+        warn.textContent = "Active strategies have different WBTC destinations, so the daily swap keeps the WBTC in the DCA wallet. Give them the same destination (or none) to deliver it.";
+        parts.push(warn);
+      }
+      document.getElementById("strategy-head").replaceChildren(...parts);
     }
 
     function renderTabs() {
@@ -409,6 +420,7 @@ function openStrategyDialog(s) {
   // an unchanged past end date must not block editing other fields; the server refuses any new date before tomorrow
   end.min = end.value && end.value < tomorrow ? end.value : tomorrow;
   document.getElementById("sf-max").value = s?.maxTotal ?? "";
+  document.getElementById("sf-dest").value = s?.destination ?? "";
   const room = Number(maxRunTotal) - Number(dailyTotal) + (s?.status === "active" ? Number(s.amount) : 0);
   amount.max = String(Math.max(0, Math.min(Number(maxRunTotal), room)));
   document.getElementById("sf-hint").textContent = `Daily total of active strategies: ${dailyTotal} of ${maxRunTotal} USDT0 per run.`;
@@ -432,15 +444,28 @@ document.getElementById("strategy-form").addEventListener("submit", async (event
     maxTotal: document.getElementById("sf-max").value.trim() || null,
   };
   if (editing && body.endDate === editing.endDate) delete body.endDate;
+  const destination = document.getElementById("sf-dest").value.trim();
+  const destChanged = destination !== (editing?.destination ?? "");
+  if (destChanged && destination && !confirm(`Send this strategy's WBTC to ${destination}?\n\nCheck it character by character: WBTC sent to a wrong address is lost.`)) return;
   const res = await withTotp((totp) => editing
     ? api(`/api/strategies/${editing.id}`, totp ? { ...body, totp } : body, "PATCH")
     : api("/api/strategies", totp ? { ...body, totp } : body));
+  const msg = document.getElementById("sf-msg");
   if (!res.ok) {
     const response = await res.json().catch(() => ({}));
-    document.getElementById("sf-msg").textContent = response.error ?? `error ${res.status}`;
+    msg.textContent = response.error ?? `error ${res.status}`;
     return;
   }
   const saved = await res.json();
+  if (destChanged) {
+    // separate TOTP-gated route (F17); the window opened above usually covers it
+    editing = saved;
+    const destRes = await withTotp((totp) => api(`/api/strategies/${saved.id}/destination`, totp ? { destination, totp } : { destination }));
+    if (!destRes.ok) {
+      msg.textContent = `Saved, but the destination was not: ${(await destRes.json().catch(() => ({}))).error ?? `error ${destRes.status}`}`;
+      return;
+    }
+  }
   dialog.close();
   go(`#s/${saved.id}`);
 });

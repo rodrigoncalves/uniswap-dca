@@ -18,7 +18,7 @@ const KEY2 = "0x" + "22".repeat(32);
 test("seedFromEnv: empty db + DCA_AMOUNT -> strategy #1, no label, active", () => {
   const db = openDb(":memory:");
   seedFromEnv(db, { DCA_AMOUNT: "10" }, NOW, null);
-  assert.deepEqual(listStrategies(db), [{ id: 1, label: null, amount: "10", status: "active", endDate: null, maxTotal: null, createdAt: NOW, stoppedAt: null }]);
+  assert.deepEqual(listStrategies(db), [{ id: 1, label: null, amount: "10", status: "active", endDate: null, maxTotal: null, createdAt: NOW, stoppedAt: null, destination: null }]);
   db.close();
 });
 

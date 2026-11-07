@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays } from "./db.js";
+import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination } from "./db.js";
 import { assertPrivateKeyUnchanged, loadPrivateKey, storePrivateKey } from "./setup.js";
 import { parsePrivateKey } from "./validation.js";
 
@@ -48,7 +48,7 @@ test("migrate: concurrent first opens of one file serialize the version check", 
       child.on("error", reject);
     })));
     const db = openDb(path);
-    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
     db.close();
   } finally {
     rmSync(path, { force: true });
@@ -416,7 +416,7 @@ test("migrate v4: a v3 database gains secrets and auth_state without losing runs
   assert.equal(getRun(db, WALLET, "2026-09-20")?.status, "CONFIRMED");
   putSecret(db, "totp_secret", "b");
   assert.equal(claimTotpStep(db, 1), true);
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
   db.close();
   rmSync(path, { force: true });
 });
@@ -454,7 +454,7 @@ function withStrategies(db: DatabaseSync, ...amounts: string[]): number[] {
 test("strategies: create, get, list, update, complete by hand and reactivate", () => {
   const db = openDb(":memory:");
   const [a] = withStrategies(db, "10");
-  assert.deepEqual(getStrategy(db, a!), { id: a, label: null, amount: "10", status: "active", endDate: null, maxTotal: null, createdAt: T0, stoppedAt: null });
+  assert.deepEqual(getStrategy(db, a!), { id: a, label: null, amount: "10", status: "active", endDate: null, maxTotal: null, createdAt: T0, stoppedAt: null, destination: null });
   updateStrategy(db, a!, { label: "Aug/26", amount: "12.5", endDate: "2026-12-31" }, T0, TODAY, 6);
   updateStrategy(db, a!, { status: "paused" }, T0, TODAY, 6);
   assert.equal(getStrategy(db, a!)!.status, "paused");
@@ -699,7 +699,7 @@ test("migrate v5: v4 history becomes strategy #1's (shares at 100%, manual rows)
   assert.deepEqual(shares.map((s) => [s.strategyId, s.amountIn, s.amountOut, s.gasCostUsd]), [[1, "10000000", "11838", "0.0070"]]);
   assert.equal((db.prepare("SELECT strategy_id FROM manual_runs").get() as { strategy_id: number }).strategy_id, 1);
   assert.equal(isPaused(db, "2026-09-24T00:00:00Z"), true, "pause survives the re-key");
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
   db.close();
   rmSync(path, { force: true });
 });
@@ -760,7 +760,7 @@ test("migrate v5: failure rolls back schema changes and leaves v4 restartable", 
   raw.close();
 
   const recovered = openDb(path);
-  assert.equal((recovered.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 10);
+  assert.equal((recovered.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
   assert.equal(getControl(recovered)?.paused, true);
   recovered.close();
   rmSync(path, { force: true });
@@ -920,6 +920,40 @@ test("migrate v8 -> v9: stopped strategies become completed", () => {
   assert.equal(getStrategy(db, a!)!.status, "completed");
   assert.equal(getStrategy(db, a!)!.stoppedAt, "2026-09-25T10:00:00.000Z", "end time kept");
   assert.equal(getStrategy(db, b!)!.status, "paused", "other statuses untouched");
+  db.close();
+  rmSync(dir, { recursive: true });
+});
+
+test("strategy destination (F17): none by default, set per strategy, cleared with null, survives reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dca-dest-"));
+  const file = join(dir, "t.db");
+  const db = openDb(file);
+  const [a, b] = withStrategies(db, "10", "5");
+  assert.equal(getStrategy(db, a!)!.destination, null);
+  setStrategyDestination(db, a!, "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12");
+  setStrategyDestination(db, b!, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+  db.close();
+  const again = openDb(file);
+  assert.equal(getStrategy(again, a!)!.destination, "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12");
+  assert.equal(listStrategies(again).find((s) => s.id === b)!.destination, "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed");
+  setStrategyDestination(again, a!, null);
+  assert.equal(getStrategy(again, a!)!.destination, null);
+  assert.throws(() => setStrategyDestination(again, 999, null), /not found/);
+  again.close();
+  rmSync(dir, { recursive: true });
+});
+
+test("migrate v10 -> v11: existing strategies start with no destination", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dca-dest-mig-"));
+  const file = join(dir, "t.db");
+  const first = openDb(file);
+  const [a] = withStrategies(first, "10");
+  first.close();
+  const raw = new DatabaseSync(file);
+  raw.exec("ALTER TABLE strategies DROP COLUMN destination; PRAGMA user_version = 10;");
+  raw.close();
+  const db = openDb(file);
+  assert.equal(getStrategy(db, a!)!.destination, null);
   db.close();
   rmSync(dir, { recursive: true });
 });

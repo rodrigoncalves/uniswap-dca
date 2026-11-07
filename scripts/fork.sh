@@ -427,6 +427,77 @@ s_wrong_master_key() {
   expect "$(logged "${KEY:2:40}")" 0 "key not in the log"
 }
 
+# F17: optional WBTC destination per strategy (DECISIONS.md #33). The
+# Universal Router delivers the WBTC to it inside the swap tx -- the DCA
+# wallet never holds it. Written straight into the DB, as the app would after TOTP.
+set_destination() { # strategy id, address
+  sqlite3 "$DB" "UPDATE strategies SET destination = '$2' WHERE id = $1"
+  [ "$(sqlite3 "$DB" "SELECT destination FROM strategies WHERE id = $1")" = "$2" ] || fail "destination not stored"
+}
+new_address() { cast wallet new --json | node -e 'console.log(JSON.parse(require("fs").readFileSync(0))[0].address)'; }
+init_db() { # creates the DB and seeds settings + strategy #1 (DCA_AMOUNT), as the first dca run would
+  env "${BOT_ENV[@]}" node --import tsx --input-type=module -e '
+    const { openDb } = await import("./src/db.ts");
+    const { seedSettingsAndStrategyFromEnv } = await import("./src/setup.ts");
+    const db = openDb(process.env.DB_FILE);
+    try {
+      seedSettingsAndStrategyFromEnv(db, process.env, new Date().toISOString());
+    } finally {
+      db.close();
+    }'
+}
+
+s_destination() {
+  fresh destination
+  init_db
+  local recip
+  recip=$(new_address)
+  set_destination 1 "$recip"
+  run dca || fail "dca exited non-zero (see $LOG)"
+  expect "$(row status)" CONFIRMED "status"
+  expect "$(row recipient)" "$recip" "recorded recipient"
+  expect "$(wbtc "$recip")" "$(row amount_out)" "destination WBTC = amount_out"
+  [ "$(row amount_out)" -ge "$(row minimum_amount)" ] || fail "amount_out below minimum_amount"
+  expect "$(wbtc "$ADDR")" 0 "DCA wallet WBTC (never held it)"
+  expect "$(nonce)" 2 "nonce (approve + swap, no extra transfer tx)"
+}
+
+s_destination_mixed() {
+  fresh destination_mixed
+  init_db
+  sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
+  local recip
+  recip=$(new_address)
+  set_destination 1 "$recip"
+  run dca || fail "dca exited non-zero (see $LOG)"
+  expect "$(row status)" CONFIRMED "status"
+  expect "$(wbtc "$recip")" 0 "destination got nothing (strategies disagree)"
+  expect "$(wbtc "$ADDR")" "$(row amount_out)" "WBTC stayed in the DCA wallet"
+  expect "$(logged 'different WBTC destinations')" 1 "warns about the mix"
+}
+
+s_destination_manual() {
+  fresh destination_manual
+  init_db
+  sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
+  local recip
+  recip=$(new_address)
+  set_destination 2 "$recip"
+  run dca --manual --strategy 2 || fail "manual buy failed (see $LOG)"
+  expect "$(mrows status)" CONFIRMED "status"
+  expect "$(wbtc "$recip")" "$(mrows amount_out)" "a manual buy uses its strategy's destination"
+  expect "$(wbtc "$ADDR")" 0 "DCA wallet WBTC"
+}
+
+s_destination_bad() {
+  fresh destination_bad
+  init_db
+  set_destination 1 "$WBTC" # a value the app would refuse
+  run dca && fail "a forbidden stored destination should exit non-zero"
+  expect "$(row status)" FAILED "status"
+  expect "$(nonce)" 0 "nothing sent"
+}
+
 # F1c: settings in the database, 15-min cron gate.
 s_not_due() {
   local later
@@ -456,7 +527,7 @@ s_bad_env() {
   expect "$(nonce)" 0 "nothing sent"
 }
 
-ALL=(idempotency parallel kill9 dropped pause revoke approve manual manual_cap manual_kill9 manual_paused report_failure report_off report_errors_only funds_low funds_empty funds_ok app_buy strategies late_strategy strategy_paused end_date max_total key_change wrong_master_key not_due not_configured bad_env)
+ALL=(destination destination_mixed destination_manual destination_bad idempotency parallel kill9 dropped pause revoke approve manual manual_cap manual_kill9 manual_paused report_failure report_off report_errors_only funds_low funds_empty funds_ok app_buy strategies late_strategy strategy_paused end_date max_total key_change wrong_master_key not_due not_configured bad_env)
 for s in "${@:-${ALL[@]}}"; do
   echo "== $s"
   "s_$s"

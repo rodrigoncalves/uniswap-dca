@@ -19,12 +19,12 @@ import { loadAppConfig, loadMasterKey, loadConfig } from "./config.js";
 import { createRpcClient, getNativeBalance, getErc20Balance, getErc20Allowance } from "./wallet.js";
 import { PERMIT2_ADDRESS } from "./tokens.js";
 import { balanceHealth, averageGasWei, GAS_SAMPLE_RUNS } from "./health.js";
-import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
+import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import { base32Encode, base32Decode, matchTotp, otpauthUri } from "./totp.js";
 import { Elevations, TotpLockout, ELEVATION_TTL_MS } from "./elevation.js";
-import { summarize } from "./report.js";
-import { parseStrategyInput, parsePrivateKey, assertRunTotal, amountToUnits, formatUnits, limitReached, AMOUNT_DECIMALS, MAX_RUN_TOTAL, ValidationError, validateSettings, SETTINGS_CAPS } from "./validation.js";
+import { summarize, sendReport } from "./report.js";
+import { parseStrategyInput, parsePrivateKey, assertRunTotal, amountToUnits, formatUnits, limitReached, AMOUNT_DECIMALS, MAX_RUN_TOTAL, ValidationError, validateSettings, SETTINGS_CAPS, parseDestination } from "./validation.js";
 import { seedFromEnv, loadPrivateKey, storePrivateKey, SetupError, setupIssues } from "./setup.js";
 import { logger, registerSecret } from "./logger.js";
 
@@ -52,7 +52,7 @@ for (const name of ["totp_secret", "private_key"] as const) {
 const rpc = (() => {
   try {
     const bot = loadConfig();
-    return { client: createRpcClient(bot.rpcUrl, bot.rpcUrlFallback), tokenIn: bot.tokenIn };
+    return { client: createRpcClient(bot.rpcUrl, bot.rpcUrlFallback), tokenIn: bot.tokenIn, tokenOut: bot.tokenOut, report: bot.report };
   } catch {
     logger.warn("balance panel unavailable: bot config (RPC_URL, ...) incomplete in this environment");
     return null;
@@ -64,6 +64,20 @@ let balanceCache: { walletAddress: string; at: number; reads: { tokenIn: bigint;
 /** Derive the current address from the database; replacing the key changes it immediately. */
 function walletAddress(): `0x${string}` | null {
   return getSecret(db, "private_key") === undefined ? null : parsePrivateKey(loadPrivateKey(db, masterKey)).address;
+}
+
+/** Best effort, like reports: a failed email is logged and never undoes the change. */
+function notifyDestinationChange(strategy: string, previous: string | null, next: string | null): void {
+  if (!rpc?.report) return;
+  const text = [
+    next ? `The WBTC destination of ${strategy} was changed in the app to ${next}.` : `The WBTC destination of ${strategy} was cleared in the app.`,
+    `Before: ${previous ?? "the DCA wallet"}. It applies from the next purchase.`,
+    "",
+    "If you did not make this change: clear it in the app, pause the DCA, and replace the app password and authenticator.",
+  ].join("\n");
+  sendReport(rpc.report, { subject: `DCA: WBTC destination ${next ? "changed" : "cleared"} (${strategy})`, text }).catch((err) =>
+    logger.error("destination change email failed", { error: err })
+  );
 }
 
 async function balanceResponse() {
@@ -726,6 +740,34 @@ const server = createServer((req, res) => {
       const id = createStrategy(db, { label: input.label ?? null, amount: input.amount!, endDate: input.endDate ?? null, maxTotal: input.maxTotal ?? null, createdAt: new Date().toISOString() });
       logger.info("strategy created from the app", { id, amount: input.amount });
       sendJson(res, 201, getStrategy(db, id));
+    });
+    return;
+  }
+
+  // F17: optional WBTC destination per strategy (DECISIONS.md #33). TOTP like
+  // the key; takes effect from the next purchase and every change is emailed.
+  // Empty clears it.
+  const destinationRoute = /^\/api\/strategies\/(\d+)\/destination$/.exec(url.pathname);
+  if (destinationRoute && req.method === "POST") {
+    const id = Number(destinationRoute[1]);
+    if (!Number.isSafeInteger(id) || id < 1) return sendJson(res, 400, { error: "invalid strategy id" });
+    postJson(req, res, (body) => {
+      if (!requireElevation(req, res, body)) return;
+      const current = getStrategy(db, id);
+      if (!current) return sendJson(res, 404, { error: `strategy #${id} not found` });
+      let address;
+      try {
+        address = parseDestination(body.destination, { dcaWallet: walletAddress(), extraForbidden: rpc ? [rpc.tokenIn, rpc.tokenOut] : [] });
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof ValidationError ? err.message : "invalid destination" });
+      }
+      if (address !== current.destination) {
+        setStrategyDestination(db, id, address);
+        const name = `strategy #${id}${current.label ? ` (${current.label})` : ""}`;
+        logger.warn("WBTC destination changed from the app", { strategy: id, previous: current.destination, destination: address });
+        notifyDestinationChange(name, current.destination, address);
+      }
+      sendJson(res, 200, { destination: address });
     });
     return;
   }

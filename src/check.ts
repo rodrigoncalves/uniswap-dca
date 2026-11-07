@@ -2,7 +2,7 @@
 // on-chain reality before anything risks money.
 import { loadConfig, loadMasterKey } from "./config.js";
 import { PERMIT2_ADDRESS, CHAINLINK_FEEDS } from "./tokens.js";
-import { MAX_ORACLE_AGE_SECONDS } from "./validation.js";
+import { MAX_ORACLE_AGE_SECONDS, resolveRecipient } from "./validation.js";
 import {
   createRpcClient,
   getAccount,
@@ -13,9 +13,10 @@ import {
   getTokenMeta,
   getChainlinkPrice,
   supportsSimulateV1,
+  isContract,
 } from "./wallet.js";
 import { logger } from "./logger.js";
-import { openDb } from "./db.js";
+import { openDb, listStrategies } from "./db.js";
 import { loadSettings, loadPrivateKey } from "./setup.js";
 
 function fmtAge(seconds: number): string {
@@ -90,7 +91,22 @@ async function main(): Promise<void> {
   }
 
   console.log("\n=== WBTC DESTINATION ===");
-  console.log(`DCA wallet itself: ${account.address} (OUTPUT_RECIPIENT removed, DECISIONS.md #23)`);
+  // Same function the run uses: a stored value it would refuse fails here too.
+  const today = new Date().toISOString().slice(0, 10);
+  const strategies = listStrategies(db);
+  const active = strategies.filter((st) => st.status === "active" && (st.endDate === null || st.endDate >= today));
+  const { recipient, mixed } = resolveRecipient(active.map((st) => st.destination), account.address, [config.tokenIn, config.tokenOut]);
+  for (const st of strategies) {
+    console.log(`strategy #${st.id}${st.label ? ` (${st.label})` : ""} [${st.status}]: ${st.destination ?? "DCA wallet"}`);
+  }
+  console.log(mixed
+    ? `today's scheduled swap: DIFFERENT destinations among active strategies -- the WBTC stays in the DCA wallet (${account.address})`
+    : `today's scheduled swap delivers to: ${recipient}${recipient === account.address ? " (DCA wallet)" : " (inside the swap tx)"}`);
+  for (const dest of new Set(strategies.map((st) => st.destination).filter((d): d is string => d !== null))) {
+    const address = dest as `0x${string}`;
+    const [destIsContract, destBalance] = await Promise.all([isContract(client, address), getErc20Balance(client, config.tokenOut, address)]);
+    console.log(`${address}: contract ${destIsContract ? "yes -- confirm it's the expected one (e.g. a Safe on Polygon)" : "no"}, ${config.tokenOutSymbol} balance ${(Number(destBalance) / 10 ** tokenOutMeta.decimals).toFixed(tokenOutMeta.decimals)}`);
+  }
 
   console.log("\n=== eth_simulateV1 support (used in the pre-broadcast simulation, D1) ===");
   const simulateSupported = await supportsSimulateV1(client);
