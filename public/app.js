@@ -11,6 +11,8 @@
       return `${pad2(t.getDate())}/${pad2(t.getMonth() + 1)}/${t.getFullYear()}`;
     };
     const fmtDateTime = (v) => { const t = new Date(v); return `${fmtDate(v)} ${pad2(t.getHours())}:${pad2(t.getMinutes())}`; };
+    const startedAt = document.getElementById("started-at");
+    if (startedAt && !Number.isNaN(Date.parse(startedAt.dateTime))) startedAt.textContent = fmtDateTime(startedAt.dateTime);
     const escapeText = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
     function tile(label, value, cls = "", minor = false) {

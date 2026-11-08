@@ -55,6 +55,7 @@
   ::selection { background: oklch(0.75 0.165 62 / 0.35); color: var(--text); }
   :focus-visible { outline: 2px solid var(--btc); outline-offset: 2px; border-radius: 6px; }
   .shell { max-width: 1120px; margin: 0 auto; }
+  .app-footer { margin-top: 32px; color: var(--text-3); font-size: 0.78rem; text-align: center; font-variant-numeric: tabular-nums; }
   h1, h2, h3 { margin: 0; text-wrap: balance; }
   code, .mono { font-family: var(--mono); font-size: 0.85em; }
   code { word-break: break-all; }
@@ -522,6 +523,7 @@
   </section>
   </dialog>
   </main>
+  <footer class="app-footer">Running since <time id="started-at" datetime="__SERVER_STARTED_AT__">—</time></footer>
 </div>
 
   <script src="/vendor/qrcode.js"></script>

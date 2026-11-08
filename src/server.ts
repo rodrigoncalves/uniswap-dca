@@ -130,6 +130,7 @@ async function balanceResponse() {
 // app, or WORKDIR /app in the Dockerfile) always does it from the project
 // root, same convention DB_FILE already uses (relative path resolved by cwd).
 const INDEX_HTML_PATH = join(process.cwd(), "public", "index.html");
+const SERVER_STARTED_AT = new Date().toISOString();
 
 // Everything the page loads comes from here -- no CDN (the page shows the
 // TOTP secret and, from F1d, accepts the private key). Explicit map, so no
@@ -488,7 +489,7 @@ const server = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": CSP, "X-Content-Type-Options": "nosniff" });
-    res.end(html);
+    res.end(html.replace("__SERVER_STARTED_AT__", SERVER_STARTED_AT));
     return;
   }
 
