@@ -1113,7 +1113,8 @@ export function isDue(nowIso: string, runTime: string): boolean {
 // delivers the WBTC inside the swap transaction itself (no second transfer).
 // A scheduled swap serves every active strategy at once and has ONE
 // recipient: it uses a destination only when all of that swap's strategies
-// share it; otherwise the WBTC stays in the DCA wallet that day.
+// share it; otherwise the swap pays the DCA wallet and one WBTC transfer per
+// external destination follows (dca.ts deliverTransfers).
 // ============================================================
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";

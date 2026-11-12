@@ -205,8 +205,9 @@ async function runVerifiedFlow(config: Config, settings: Settings, client: Clien
 
   // Optional destination per strategy (F17, DECISIONS.md #33): the quote's
   // `recipient`, so the Universal Router delivers the WBTC to it inside the
-  // swap tx itself. One swap has one recipient: strategies that disagree
-  // leave the WBTC in the DCA wallet. Re-validated here on every run.
+  // swap tx itself. One swap has one recipient: when strategies disagree the
+  // swap pays the DCA wallet, then one WBTC transfer per external destination
+  // (deliverTransfers). Re-validated here on every run.
   const { recipient, mixed } = resolveRecipient(destinations, account.address, [config.tokenIn, config.tokenOut]);
   if (mixed) logger.warn("strategies in this swap have different WBTC destinations -- swap to the DCA wallet, then one transfer per destination");
 
@@ -550,6 +551,8 @@ async function sendTransfer(db: DatabaseSync, config: Config, client: Client, ac
   let nonce: number;
   let signed: Awaited<ReturnType<typeof signTx>>;
   try {
+    // Before the balance check: if the previous tx did deliver, the WBTC is already gone.
+    if (await adoptPreviousTx(db, config, client, t, claimedAt)) return null;
     const balance = await getErc20Balance(client, config.tokenOut, account.address);
     if (balance < amount) {
       failTransferBeforeSend(db, t, claimedAt, "insufficient_wbtc", "insufficient WBTC in the DCA wallet");
@@ -591,14 +594,34 @@ async function sendTransfer(db: DatabaseSync, config: Config, client: Client, ac
   return { ...t, status: "BROADCAST", nonce, txHash: signed.hash, claimedAt };
 }
 
+/**
+ * A retried transfer whose previous tx mined after all (a false nonce_consumed,
+ * then Retry): record that receipt under our claim instead of sending again.
+ * False (send normally) when there is no previous tx, no receipt, a revert, or
+ * not exactly `amount` to the destination.
+ */
+async function adoptPreviousTx(db: DatabaseSync, config: Config, client: Client, t: Transfer, claimedAt: string): Promise<boolean> {
+  if (t.prevTxHash === null) return false;
+  const receipt = await getReceipt(client, t.prevTxHash as `0x${string}`);
+  if (receipt === null || receipt.status !== "success") return false;
+  try {
+    assertExactTransfer(receipt.logs as ReceiptLog[], config, t.destination, BigInt(t.amount));
+  } catch {
+    return false;
+  }
+  logger.warn("WBTC transfer's previous tx did mine -- adopting it, nothing sent", { id: t.id, txHash: t.prevTxHash });
+  finalizeTransfer(db, config, { ...t, txHash: t.prevTxHash }, receipt, claimedAt);
+  return true;
+}
+
 /** A lost BROADCAST-side compare-and-set (another process resolved this attempt) is logged; any other error rethrows and stops delivery. */
 function resolvedElsewhere(t: Transfer, err: unknown): void {
   if (!(err instanceof TransferStaleError)) throw err;
   logger.warn("WBTC transfer already resolved elsewhere -- skipped", { id: t.id, txHash: t.txHash, error: err });
 }
 
-/** Receipt -> CONFIRMED/FAILED, charging its real gas to the destination's shares. */
-function finalizeTransfer(db: DatabaseSync, config: Config, t: Transfer, receipt: NonNullable<Awaited<ReturnType<typeof getReceipt>>>): void {
+/** Receipt -> CONFIRMED/FAILED, charging its real gas to the destination's shares. `adoptClaimedAt`: see adoptPreviousTx. */
+function finalizeTransfer(db: DatabaseSync, config: Config, t: Transfer, receipt: NonNullable<Awaited<ReturnType<typeof getReceipt>>>, adoptClaimedAt?: string): void {
   const run = getRun(db, t.wallet, t.date);
   // Throws before any write: the row stays BROADCAST and the next tick tries again.
   if (!run?.oraclePolUsd) throw new Error(`transfer #${t.id}: run ${t.date} has no oracle POL/USD -- gas USD unknown, left BROADCAST`);
@@ -620,7 +643,7 @@ function finalizeTransfer(db: DatabaseSync, config: Config, t: Transfer, receipt
     }
   }
   try {
-    recordTransferReceipt(db, t.id, { txHash: t.txHash!, ...outcome, ...gasFields });
+    recordTransferReceipt(db, t.id, { txHash: t.txHash!, ...outcome, ...gasFields }, adoptClaimedAt);
   } catch (err) {
     resolvedElsewhere(t, err);
     return;
@@ -679,13 +702,15 @@ async function recoverTransfer(db: DatabaseSync, config: Config, client: Client,
   }
 }
 
-/** Every open transfer, oldest first. Stops at one still in flight. Nothing is sent while paused. */
+/** Every open transfer, oldest first. Stops at one still in flight. While paused, BROADCAST ones are still resolved (nothing new is sent); the rest wait. */
 async function deliverTransfers(db: DatabaseSync, config: Config, client: Client, account: Account): Promise<void> {
+  let waiting = false;
   for (const open of listTransfers(db, { wallet: account.address, open: true })) {
     // Re-checked per transfer: an output_mismatch earlier in this loop pauses.
-    if (isPaused(db, new Date().toISOString())) {
-      logger.info("DCA paused -- WBTC transfers wait");
-      return;
+    if (open.status !== "BROADCAST" && isPaused(db, new Date().toISOString())) {
+      if (!waiting) logger.info("DCA paused -- WBTC transfers wait");
+      waiting = true;
+      continue;
     }
     // SENDING too: claimTransfer returns a stale one to PENDING first; a live one belongs to another process.
     const t = open.status === "BROADCAST" ? open : await sendTransfer(db, config, client, account, open);
@@ -787,6 +812,15 @@ async function emailFundsAlert(config: Config, db: DatabaseSync, client: Client,
     ]);
     const settings = getSettings(db);
     const nowIso = new Date().toISOString();
+    let transfersPerDay = 0;
+    try {
+      transfersPerDay = expectedTransfersPerDay(
+        listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= nowIso.slice(0, 10))).map((s) => s.destination),
+        account.address, [config.tokenIn, config.tokenOut]);
+    } catch (err) {
+      // Corrupt stored destination: the run fails closed on it; the alert still goes out, without transfer gas.
+      logger.warn("transfer gas left out of the low-funds check: a stored WBTC destination is invalid", { error: err });
+    }
     const health = balanceHealth({
       tokenInUnits,
       dailyNeedUnits: activeAmounts(db, nowIso.slice(0, 10)).reduce((sum, a) => sum + toBaseUnits(a, AMOUNT_DECIMALS), 0n),
@@ -795,9 +829,7 @@ async function emailFundsAlert(config: Config, db: DatabaseSync, client: Client,
       avgGasWei: projectedDailyGasWei(
         averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS)),
         averageGasWei(recentTransferGasCostsPol(db, GAS_SAMPLE_RUNS)),
-        expectedTransfersPerDay(
-          listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= nowIso.slice(0, 10))).map((s) => s.destination),
-          account.address, [config.tokenIn, config.tokenOut]),
+        transfersPerDay,
       ),
       allowanceUnits: 0n, // allowance runway isn't a funds problem; fundsAlert ignores it
       nowIso,
