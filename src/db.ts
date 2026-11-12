@@ -939,14 +939,15 @@ function assertFailureMatches(id: number, status: string, failure: TransferFailu
 
 /**
  * Compare-and-set: applies only while the row is still in `expect` (for
- * SENDING, still held by the claim that wrote `claimedAt`), else throws -- a
+ * SENDING, still held by the claim that wrote `claimedAt`; for BROADCAST,
+ * still the attempt with `txHash`), else throws -- a
  * stale claimer that lost its row to a reclaim can never record BROADCAST and
  * send. Transitions: SENDING -> BROADCAST | PENDING (nothing sent; releases the
  * claim) | FAILED, BROADCAST -> FAILED.
  */
 export function updateTransfer(
   db: DatabaseSync, id: number,
-  expect: { status: "SENDING"; claimedAt: string } | { status: "BROADCAST" },
+  expect: { status: "SENDING"; claimedAt: string } | { status: "BROADCAST"; txHash: string },
   patch: { status: "PENDING" | "BROADCAST" | "FAILED"; failure?: TransferFailure | null; nonce?: number; txHash?: string; error?: string | null }
 ): void {
   if (!(TRANSITIONS[expect.status] as readonly string[]).includes(patch.status)) throw new Error(`transfer #${id}: ${expect.status} -> ${patch.status} is not allowed`);
@@ -956,10 +957,10 @@ export function updateTransfer(
   const entries = Object.entries(patch).filter(([, value]) => value !== undefined) as [keyof typeof snake, string | number | null][];
   const sets = entries.map(([key]) => `${snake[key]} = ?`);
   if (patch.status === "PENDING") sets.push("claimed_at = NULL");
-  const where = expect.status === "SENDING" ? "id = ? AND status = 'SENDING' AND claimed_at = ?" : "id = ? AND status = 'BROADCAST'";
-  const keys = expect.status === "SENDING" ? [id, expect.claimedAt] : [id];
+  const where = expect.status === "SENDING" ? "id = ? AND status = 'SENDING' AND claimed_at = ?" : "id = ? AND status = 'BROADCAST' AND tx_hash = ?";
+  const keys = expect.status === "SENDING" ? [id, expect.claimedAt] : [id, expect.txHash];
   const result = db.prepare(`UPDATE transfers SET ${sets.join(", ")} WHERE ${where}`).run(...entries.map(([, v]) => v), ...keys);
-  if (result.changes !== 1) throw new Error(`transfer #${id} is no longer ${expect.status}${expect.status === "SENDING" ? ` under the claim of ${expect.claimedAt}` : ""} -- not updated`);
+  if (result.changes !== 1) throw new Error(`transfer #${id} is no longer ${expect.status}${expect.status === "SENDING" ? ` under the claim of ${expect.claimedAt}` : ` as ${expect.txHash}`} -- not updated`);
 }
 
 function addDecimal(current: string | null, delta: string, decimals: number): string {
@@ -973,7 +974,7 @@ function addDecimal(current: string | null, delta: string, decimals: number): st
  */
 export function recordTransferReceipt(
   db: DatabaseSync, id: number,
-  receipt: { status: "CONFIRMED" | "FAILED"; failure: TransferFailure | null; error: string | null; blockNumber: string; gasUsed: string; gasCostPol: string; gasCostUsd: string }
+  receipt: { txHash: string; status: "CONFIRMED" | "FAILED"; failure: TransferFailure | null; error: string | null; blockNumber: string; gasUsed: string; gasCostPol: string; gasCostUsd: string }
 ): void {
   inWriteLock(db, () => {
     const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -981,6 +982,8 @@ export function recordTransferReceipt(
     const t = rowToTransfer(row);
     assertFailureMatches(id, receipt.status, receipt.failure);
     if (t.status !== "BROADCAST") throw new Error(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
+    // A stale recoverer's receipt must never resolve (or charge gas to) a newer attempt.
+    if (t.txHash !== receipt.txHash) throw new Error(`transfer #${id} is now ${t.txHash}, not ${receipt.txHash} -- receipt not recorded`);
     db.prepare(
       `UPDATE transfers SET status = ?, failure = ?, error = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
     ).run(

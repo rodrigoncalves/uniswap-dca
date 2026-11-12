@@ -422,7 +422,7 @@ async function finalize(
   };
   if (run.manualId === undefined) {
     const shares = listRunShares(db, run.wallet, run.date).map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn), destination: s.destination }));
-    const { results, transfers } = planDay(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares, run.recipient!, run.wallet);
+    const { results, transfers } = planDay(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares, run.recipient ?? run.wallet, run.wallet);
     try {
       confirmScheduledRun(db, run.wallet, run.date, confirmation, results, transfers.map((t) => ({ destination: t.destination, amount: t.amount.toString() })));
     } catch (err) {
@@ -590,35 +590,49 @@ async function sendTransfer(db: DatabaseSync, config: Config, client: Client, ac
   return { ...t, status: "BROADCAST", nonce, txHash: signed.hash, claimedAt };
 }
 
+/** Logs a BROADCAST-side compare-and-set that lost: another process already resolved this attempt. */
+function resolvedElsewhere(t: Transfer, err: unknown): void {
+  logger.warn("WBTC transfer already resolved elsewhere -- skipped", { id: t.id, txHash: t.txHash, error: err });
+}
+
 /** Receipt -> CONFIRMED/FAILED, charging its real gas to the destination's shares. */
 function finalizeTransfer(db: DatabaseSync, config: Config, t: Transfer, receipt: NonNullable<Awaited<ReturnType<typeof getReceipt>>>): void {
-  const gasCostPol = Number(receipt.gasUsed * receipt.effectiveGasPrice) / 10 ** POL_DECIMALS;
   const run = getRun(db, t.wallet, t.date);
+  // Throws before any write: the row stays BROADCAST and the next tick tries again.
+  if (!run?.oraclePolUsd) throw new Error(`transfer #${t.id}: run ${t.date} has no oracle POL/USD -- gas USD unknown, left BROADCAST`);
+  const gasCostPol = Number(receipt.gasUsed * receipt.effectiveGasPrice) / 10 ** POL_DECIMALS;
   const gasFields = {
     blockNumber: receipt.blockNumber.toString(),
     gasUsed: receipt.gasUsed.toString(),
     gasCostPol: gasCostPol.toFixed(6),
-    gasCostUsd: (gasCostPol * Number(run?.oraclePolUsd ?? 0)).toFixed(4),
+    gasCostUsd: (gasCostPol * Number(run.oraclePolUsd)).toFixed(4),
   };
-  if (receipt.status !== "success") {
-    recordTransferReceipt(db, t.id, { status: "FAILED", failure: "reverted", error: "transfer reverted on-chain", ...gasFields });
-    logger.error("WBTC transfer reverted on-chain", { id: t.id, date: t.date, txHash: t.txHash });
-    process.exitCode = 1;
-    return;
+  let outcome: { status: "CONFIRMED"; failure: null; error: null } | { status: "FAILED"; failure: TransferFailure; error: string };
+  if (receipt.status !== "success") outcome = { status: "FAILED", failure: "reverted", error: "transfer reverted on-chain" };
+  else {
+    try {
+      assertExactTransfer(receipt.logs as ReceiptLog[], config, t.destination, BigInt(t.amount));
+      outcome = { status: "CONFIRMED", failure: null, error: null };
+    } catch (err) {
+      outcome = { status: "FAILED", failure: "output_mismatch", error: `transfer confirmed, but output doesn't match: ${errorMessage(err)}` };
+    }
   }
   try {
-    assertExactTransfer(receipt.logs as ReceiptLog[], config, t.destination, BigInt(t.amount));
+    recordTransferReceipt(db, t.id, { txHash: t.txHash!, ...outcome, ...gasFields });
   } catch (err) {
-    // Same reasoning as the swap's finalize: WBTC moved unexpectedly, stop until someone looks.
-    const message = `transfer confirmed, but output doesn't match: ${errorMessage(err)}`;
-    recordTransferReceipt(db, t.id, { status: "FAILED", failure: "output_mismatch", error: message, ...gasFields });
-    setPaused(db, { paused: true, reason: `auto-paused: ${t.date} WBTC ${message}` });
-    logger.error("WBTC transfer output doesn't match -- DCA paused", { id: t.id, date: t.date, txHash: t.txHash, error: message });
-    process.exitCode = 1;
+    resolvedElsewhere(t, err);
     return;
   }
-  recordTransferReceipt(db, t.id, { status: "CONFIRMED", failure: null, error: null, ...gasFields });
-  logger.info("WBTC transfer confirmed", { id: t.id, date: t.date, destination: t.destination, amount: t.amount, txHash: t.txHash });
+  if (outcome.status === "CONFIRMED") {
+    logger.info("WBTC transfer confirmed", { id: t.id, date: t.date, destination: t.destination, amount: t.amount, txHash: t.txHash });
+    return;
+  }
+  process.exitCode = 1;
+  if (outcome.failure === "output_mismatch") {
+    // Same reasoning as the swap's finalize: WBTC moved unexpectedly, stop until someone looks.
+    setPaused(db, { paused: true, reason: `auto-paused: ${t.date} WBTC ${outcome.error}` });
+    logger.error("WBTC transfer output doesn't match -- DCA paused", { id: t.id, date: t.date, txHash: t.txHash, error: outcome.error });
+  } else logger.error("WBTC transfer reverted on-chain", { id: t.id, date: t.date, txHash: t.txHash });
 }
 
 /** Resolves a BROADCAST transfer. False = still unmined with its nonce free: later nonces would queue behind it. */
@@ -643,7 +657,12 @@ async function recoverTransfer(db: DatabaseSync, config: Config, client: Client,
         continue;
       }
       const error = `nonce ${t.nonce} consumed by another tx; ${hash} never mined`;
-      updateTransfer(db, t.id, { status: "BROADCAST" }, { status: "FAILED", failure: "nonce_consumed", error });
+      try {
+        updateTransfer(db, t.id, { status: "BROADCAST", txHash: hash }, { status: "FAILED", failure: "nonce_consumed", error });
+      } catch (err) {
+        resolvedElsewhere(t, err);
+        return true;
+      }
       logger.error("WBTC transfer not confirmed", { id: t.id, date: t.date, error });
       process.exitCode = 1;
       return true;
@@ -739,7 +758,13 @@ async function realRun(config: Config, db: DatabaseSync, client: Client, account
     }
     logger.info("scheduled buy", { date, total: totalHuman, strategies: claim.shares.map((s) => s.strategyId) });
     await execute(config, db, client, account, totalHuman, totalHuman, { wallet: account.address, date }, claim.shares.map((s) => s.destination));
-    await deliverTransfers(db, config, client, account);
+    try {
+      await deliverTransfers(db, config, client, account);
+    } catch (err) {
+      // The purchase is final; a delivery error (RPC blip) must not cost the day's report. Open transfers retry next tick.
+      logger.error("WBTC transfer delivery failed", { error: err, date });
+      process.exitCode = 1;
+    }
   }
   await emailReport(config, db, account.address, date);
   await emailFundsAlert(config, db, client, account);

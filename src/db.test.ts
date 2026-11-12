@@ -1117,11 +1117,11 @@ test("recordTransferReceipt charges real gas to that destination's shares by amo
   const db = openDb(":memory:");
   const id = confirmedMixedDay(db);
   broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
-  recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
-  assert.throws(() => recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" }), /BROADCAST/, "a receipt is charged once");
+  recordTransferReceipt(db, id, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  assert.throws(() => recordTransferReceipt(db, id, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" }), /BROADCAST/, "a receipt is charged once");
   assert.deepEqual(retryTransfer(db, id, false), { ok: true });
   broadcast(db, id, at(H), 8, "0xbb");
-  recordTransferReceipt(db, id, { status: "CONFIRMED", failure: null, error: null, blockNumber: "2", gasUsed: "50000", gasCostPol: "0.000800", gasCostUsd: "0.0004" });
+  recordTransferReceipt(db, id, { txHash: "0xbb", status: "CONFIRMED", failure: null, error: null, blockNumber: "2", gasUsed: "50000", gasCostPol: "0.000800", gasCostUsd: "0.0004" });
   const shares = listRunShares(db, WALLET, MIX_DATE);
   assert.deepEqual(shares.map((s) => s.gasCostPol), ["0.001300", "0.003900", "0.000500"]); // +0.0012 split 1:3; #3 untouched
   assert.deepEqual(shares.map((s) => s.gasCostUsd), ["0.0003", "0.0011", "0.0001"]); // 0.0002 -> 0/2 (remainder to the largest), 0.0004 -> 1/3
@@ -1139,7 +1139,7 @@ test("retryTransfer: refuses while paused, non-FAILED, and output_mismatch / bad
   assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
   broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
   assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
-  recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "boom", blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  recordTransferReceipt(db, id, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "boom", blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
   for (const failure of ["output_mismatch", "bad_destination"] as const) {
     setFailure(db, id, failure);
     assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: `${failure} is not retryable -- inspect it by hand` });
@@ -1164,7 +1164,7 @@ test("retryTransfer: refuses while paused, non-FAILED, and output_mismatch / bad
   assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after no tx: e");
   // nonce_consumed: BROADCAST -> FAILED, no error text -> no ": null" suffix
   broadcast(db, id, at(2 * H), 8, "0xcc");
-  updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xcc" }, { status: "FAILED", failure: "nonce_consumed", error: null });
   assert.deepEqual(retryTransfer(db, id, false), { ok: true });
   assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after 0xcc");
   assert.deepEqual(listTransfers(db, { wallet: "0x0000000000000000000000000000000000000B0b" }), []);
@@ -1185,16 +1185,16 @@ test("updateTransfer is compare-and-set: a stale claimer can't broadcast after a
   let t = listTransfers(db, { wallet: WALLET })[0]!;
   assert.deepEqual([t.status, t.nonce, t.txHash, t.claimedAt], ["BROADCAST", 9, "0xbb", at(2 * H)], "row as B left it");
 
-  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" } as never, { status: "PENDING" }), /BROADCAST -> PENDING is not allowed/);
-  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED" }), /failure code/);
-  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: null }), /failure code/);
-  assert.throws(() => recordTransferReceipt(db, id, { status: "FAILED", failure: null, error: "x", blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
-  assert.throws(() => recordTransferReceipt(db, id, { status: "CONFIRMED", failure: "reverted", error: null, blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" } as never, { status: "PENDING" }), /BROADCAST -> PENDING is not allowed/);
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED" }), /failure code/);
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED", failure: null }), /failure code/);
+  assert.throws(() => recordTransferReceipt(db, id, { txHash: "0xbb", status: "FAILED", failure: null, error: "x", blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
+  assert.throws(() => recordTransferReceipt(db, id, { txHash: "0xbb", status: "CONFIRMED", failure: "reverted", error: null, blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
   t = listTransfers(db, { wallet: WALLET })[0]!;
   assert.deepEqual([t.status, t.gasUsed], ["BROADCAST", null], "rejected calls change nothing");
 
   // SENDING -> PENDING (error before broadcast) releases the claim; BROADCAST needs nonce + hash
-  updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: "reverted", error: "r" });
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED", failure: "reverted", error: "r" });
   retryTransfer(db, id, false);
   assert.equal(claimTransfer(db, id, at(3 * H), at(2 * H)), true);
   assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: at(3 * H) }, { status: "BROADCAST" }), /nonce and tx hash/);
@@ -1227,4 +1227,21 @@ test("migrate: a DB already at v12 without the transfers table gets it", () => {
   } finally {
     rmSync(join(path, ".."), { recursive: true, force: true });
   }
+});
+
+test("BROADCAST-side writes are compare-and-set on the tx hash: a stale recoverer can't fail or charge a newer attempt", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  recordTransferReceipt(db, id, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  broadcast(db, id, at(H), 8, "0xbb"); // the retry is in flight as 0xbb
+  const before = { t: listTransfers(db, { wallet: WALLET })[0], shares: listRunShares(db, WALLET, MIX_DATE) };
+  // A recoverer still holding the 0xaa snapshot wakes up:
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" }, { status: "FAILED", failure: "nonce_consumed", error: null }), /no longer BROADCAST/);
+  assert.throws(() => recordTransferReceipt(db, id, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" }), /0xaa/);
+  assert.deepEqual({ t: listTransfers(db, { wallet: WALLET })[0], shares: listRunShares(db, WALLET, MIX_DATE) }, before, "row and shares untouched");
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "FAILED");
+  db.close();
 });
