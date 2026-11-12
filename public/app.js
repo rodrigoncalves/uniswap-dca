@@ -221,8 +221,8 @@
       const active = strategies.filter((x) => x.status === "active" && (!x.endDate || x.endDate >= today));
       if (s.status === "active" && new Set(active.map((x) => x.destination ?? "")).size > 1) {
         const warn = document.createElement("p");
-        warn.className = "reason danger";
-        warn.textContent = "Active strategies have different WBTC destinations, so the daily swap keeps the WBTC in the DCA wallet. Give them the same destination (or none) to deliver it.";
+        warn.className = "reason";
+        warn.textContent = "Active strategies have different WBTC destinations: the daily swap lands in the DCA wallet and a separate transfer (extra gas, charged to those strategies) sends each share to its destination.";
         parts.push(warn);
       }
       document.getElementById("strategy-head").replaceChildren(...parts);
@@ -274,7 +274,51 @@
       const data = await res.json();
       renderTiles(data.tiles);
       renderBanner(data.control);
+      renderTransfers(data.transfers);
       renderRows(data.runs);
+    }
+
+    // Mixed WBTC destinations: transfers not yet CONFIRMED, with a TOTP retry for the retryable failures.
+    const RETRYABLE = ["reverted", "nonce_consumed", "insufficient_wbtc"];
+    const IN_FLIGHT = ["PENDING", "SENDING", "BROADCAST"];
+    let transfers = [];
+    function renderTransfers(list) {
+      transfers = list ?? [];
+      document.getElementById("transfers-banner").classList.toggle("visible", transfers.length > 0);
+      document.getElementById("transfers-list").replaceChildren(...transfers.map((t) => {
+        const row = document.createElement("div");
+        if (t.status === "FAILED") row.className = "danger";
+        const dest = `${t.destination.slice(0, 6)}…${t.destination.slice(-4)}`;
+        row.textContent = `${fmtDate(t.date)} · ${dest} · ${(Number(t.amount) / 1e8).toFixed(8)} BTC · ${t.status}${t.failure ? ` (${t.failure})` : ""}${t.error ? ` — ${t.error}` : ""}`;
+        if (t.txHash && /^0x[a-fA-F0-9]{64}$/.test(t.txHash)) {
+          const a = document.createElement("a");
+          a.href = `https://polygonscan.com/tx/${t.txHash}`;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = `${t.txHash.slice(0, 10)}…`;
+          row.append(" ", a);
+        }
+        if (t.status === "FAILED" && RETRYABLE.includes(t.failure)) {
+          const btn = document.createElement("button");
+          btn.textContent = "Retry";
+          btn.addEventListener("click", () => retryTransfer(t, btn));
+          row.append(btn);
+        }
+        return row;
+      }));
+    }
+
+    async function retryTransfer(t, btn) {
+      if (!confirm(`Send ${(Number(t.amount) / 1e8).toFixed(8)} BTC to ${t.destination} now? This sends a real transaction.`)) return;
+      btn.disabled = true;
+      const res = await withTotp((totp) => api(`/api/transfers/${t.id}/retry`, totp ? { totp } : {}));
+      if (!res.ok) { btn.disabled = false; return strategyError(res); }
+      watchTransfer(t.id);
+    }
+
+    async function watchTransfer(id) {
+      await load();
+      if (IN_FLIGHT.includes(transfers.find((x) => x.id === id)?.status)) setTimeout(() => watchTransfer(id), 3000);
     }
 
     async function setPaused(paused) {
@@ -289,7 +333,10 @@
       const state = await res.json();
       buying = state.running;
       btnBuy.disabled = buying;
-      if (state.running) {
+      if (state.kind === "transfers") {
+        buyStatus.textContent = state.running ? "Sending WBTC transfers..." : "";
+        if (state.running) setTimeout(watchBuy, 3000);
+      } else if (state.running) {
         buyStatus.textContent = `Buying ${state.amount} USDT0... (usually under a minute)`;
         setTimeout(watchBuy, 3000);
       } else if (state.exitCode !== null) {

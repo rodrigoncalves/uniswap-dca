@@ -16,7 +16,7 @@ import {
   isContract,
 } from "./wallet.js";
 import { logger } from "./logger.js";
-import { openDb, listStrategies } from "./db.js";
+import { openDb, listStrategies, listTransfers } from "./db.js";
 import { loadSettings, loadPrivateKey } from "./setup.js";
 
 function fmtAge(seconds: number): string {
@@ -99,9 +99,13 @@ async function main(): Promise<void> {
   for (const st of strategies) {
     console.log(`strategy #${st.id}${st.label ? ` (${st.label})` : ""} [${st.status}]: ${st.destination ?? "DCA wallet"}`);
   }
+  const transferCount = new Set(active.map((st) => st.destination).filter((d) => d !== null)).size;
   console.log(mixed
-    ? `today's scheduled swap: DIFFERENT destinations among active strategies -- the WBTC stays in the DCA wallet (${account.address})`
+    ? `today's scheduled swap: mixed destinations -- delivers to the DCA wallet, then ${transferCount} transfer(s)`
     : `today's scheduled swap delivers to: ${recipient}${recipient === account.address ? " (DCA wallet)" : " (inside the swap tx)"}`);
+  for (const t of listTransfers(db, { wallet: account.address, unconfirmed: true })) {
+    console.log(`#${t.id} ${t.date} ${t.destination} ${(Number(t.amount) / 10 ** tokenOutMeta.decimals).toFixed(tokenOutMeta.decimals)} ${t.status} ${t.failure ?? ""} ${t.error ?? ""}`.trimEnd());
+  }
   for (const dest of new Set(strategies.map((st) => st.destination).filter((d): d is string => d !== null))) {
     const address = dest as `0x${string}`;
     const [destIsContract, destBalance] = await Promise.all([isContract(client, address), getErc20Balance(client, config.tokenOut, address)]);

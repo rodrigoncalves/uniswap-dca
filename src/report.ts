@@ -4,7 +4,7 @@
 // dependency). Sending never affects a purchase: dca.ts calls it after the
 // run is final and swallows its errors.
 
-import type { Run } from "./db.js";
+import type { Run, Transfer, ReportMode } from "./db.js";
 import type { ReportConfig } from "./config.js";
 import type { FundsAlertItem } from "./health.js";
 
@@ -49,9 +49,23 @@ const btc = (base: string | null) => (Number(base ?? "0") / 10 ** DECIMALS_OUT).
 const escapeHtml = (v: string) =>
   v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-/** Email for one scheduled run; `all` gives the running totals. Text + HTML (inline styles: mail clients drop <style>). */
-export function buildReport(run: Run, shares: { label: string; amountIn: string; amountOut: string | null }[], all: Run[]): { subject: string; text: string; html: string } {
+/** `errors` mode: a failed run, or a WBTC transfer of that day that failed. */
+export function shouldSendReport(mode: ReportMode, run: Run, transfers: Transfer[]): boolean {
+  if (mode === "off") return false;
+  return mode === "all" || run.status === "FAILED" || transfers.some((t) => t.status === "FAILED");
+}
+
+/** Email for one scheduled run; `all` gives the running totals; `transfers` = that day's WBTC transfers (mixed destinations). Text + HTML (inline styles: mail clients drop <style>). */
+export function buildReport(run: Run, shares: { label: string; amountIn: string; amountOut: string | null }[], all: Run[], transfers: Transfer[] = []): { subject: string; text: string; html: string } {
   const s = summarize(all);
+  const transferLines = transfers.map((t) =>
+    t.status === "CONFIRMED"
+      ? `Sent ${btc(t.amount)} BTC to ${t.destination}: https://polygonscan.com/tx/${t.txHash}`
+      : t.status === "FAILED"
+        ? `NOT sent ${btc(t.amount)} BTC to ${t.destination} (${t.failure}) -- it is in the DCA wallet; retry from the app`
+        : `Sending ${btc(t.amount)} BTC to ${t.destination} (${t.status})`
+  );
+  const transferText = transferLines.length ? ["", "WBTC transfers:", ...transferLines.map((line) => `  ${line}`)].join("\n") : "";
   const shareRows: [string, string][] = shares.map((share) => [
     share.label,
     share.amountOut !== null ? `${usdt(share.amountIn)} USDT0 → ${btc(share.amountOut)} BTC` : `${usdt(share.amountIn)} USDT0`,
@@ -72,6 +86,7 @@ export function buildReport(run: Run, shares: { label: string; amountIn: string;
       `Gas: $${run.gasCostUsd}`,
       `Tx: ${txUrl}`,
       shareText,
+      transferText,
       "",
       totals,
     ].join("\n");
@@ -91,7 +106,7 @@ export function buildReport(run: Run, shares: { label: string; amountIn: string;
       <div style="font-size:15px;color:#6b7280;margin-top:4px">The DCA is paused. Resume it from the app.</div>`;
   } else {
     subject = `DCA ${day(run.date)}: FAILED -- nothing bought`;
-    text = [`Status: ${run.status}`, `Error: ${run.error ?? "(none recorded)"}`, txUrl ? `Tx: ${txUrl}` : "", shareText, "", totals]
+    text = [`Status: ${run.status}`, `Error: ${run.error ?? "(none recorded)"}`, txUrl ? `Tx: ${txUrl}` : "", shareText, transferText, "", totals]
       .filter((line, i, a) => line !== "" || a[i - 1] !== "")
       .join("\n");
     badge = { label: "Failed", color: "#b42318", bg: "#fdecea" };
@@ -121,6 +136,7 @@ export function buildReport(run: Run, shares: { label: string; amountIn: string;
   <tr><td style="padding:18px 24px 8px 24px">${headline}</td></tr>
   ${details.length ? `<tr><td style="padding:8px 24px 0 24px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #f0f1f3">${details.map(row).join("")}</table></td></tr>` : ""}
   ${shares.length > 1 ? `<tr><td style="padding:14px 24px 0 24px"><div style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">By strategy</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0">${shareRows.map(([k, v]) => row([escapeHtml(k), v])).join("")}</table></td></tr>` : ""}
+  ${transferLines.length ? `<tr><td style="padding:14px 24px 0 24px"><div style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">WBTC transfers</div>${transferLines.map((line) => `<div style="font-size:13px;color:#374151;padding:4px 0;word-break:break-word">${escapeHtml(line)}</div>`).join("")}</td></tr>` : ""}
   ${txUrl ? `<tr><td style="padding:14px 24px 4px 24px"><a href="${txUrl}" style="display:inline-block;padding:10px 16px;background:#111827;color:#ffffff;text-decoration:none;border-radius:8px;font-size:14px;font-weight:500">View on Polygonscan</a></td></tr>` : ""}
   <tr><td style="padding:18px 24px 22px 24px">
     <div style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:4px">So far</div>

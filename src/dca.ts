@@ -94,7 +94,7 @@ import {
 } from "./validation.js";
 import { UNIVERSAL_ROUTERS, CHAINLINK_FEEDS, PERMIT2_ADDRESS } from "./tokens.js";
 import { logger, registerSecret } from "./logger.js";
-import { buildReport, buildFundsAlert, sendReport } from "./report.js";
+import { buildReport, buildFundsAlert, sendReport, shouldSendReport } from "./report.js";
 import { balanceHealth, averageGasWei, projectedDailyGasWei, fundsAlert, GAS_SAMPLE_RUNS } from "./health.js";
 
 type Client = ReturnType<typeof createRpcClient>;
@@ -819,7 +819,8 @@ async function emailReport(config: Config, db: DatabaseSync, wallet: string, dat
   try {
     const run = getRun(db, wallet, date)!;
     const mode = getReportMode(db);
-    if (mode === "off" || (mode === "errors" && run.status !== "FAILED")) {
+    const transfers = listTransfers(db, { wallet, date });
+    if (!shouldSendReport(mode, run, transfers)) {
       logger.info("email report skipped: app mode is not sending this outcome", { date, mode, status: run.status });
       return;
     }
@@ -827,7 +828,7 @@ async function emailReport(config: Config, db: DatabaseSync, wallet: string, dat
       const st = getStrategy(db, s.strategyId);
       return { label: st?.label ?? `#${s.strategyId}`, amountIn: s.amountIn, amountOut: s.amountOut };
     });
-    await sendReport(config.report, buildReport(run, shares, listAllRuns(db)));
+    await sendReport(config.report, buildReport(run, shares, listAllRuns(db), transfers));
     logger.info("email report sent", { date, status: run.status });
   } catch (err) {
     logger.error("email report failed (the run itself is unaffected)", { error: err, date });

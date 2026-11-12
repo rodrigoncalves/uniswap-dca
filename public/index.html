@@ -131,6 +131,8 @@
   }
   .banner.visible { display: flex; }
   #banner { --banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M10 15V9M14 15V9'/%3E%3C/svg%3E"); }
+  #transfers-banner { color: var(--text-2); background: var(--surface); border-color: var(--line); }
+  #transfers-list > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; overflow-wrap: anywhere; }
   #offline-banner { color: var(--text-2); background: var(--surface); border-color: var(--line);
     --banner-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M2 2l20 20M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 5.2-2.8M19 13a10 10 0 0 0-2.3-1.6M2 8.8a15 15 0 0 1 4.2-2.6M22 8.8A15 15 0 0 0 10.7 5M12 20h.01'/%3E%3C/svg%3E"); }
 
@@ -365,6 +367,7 @@
 
   <div id="offline-banner" class="banner">Offline — figures below may be out of date. Reconnect to see live data.</div>
   <div id="banner" class="banner"></div>
+  <div id="transfers-banner" class="banner"><div><b>WBTC transfers not confirmed</b><div id="transfers-list"></div></div></div>
   <div id="setup-banner" class="banner"></div>
 
   <div id="view-main">

@@ -223,6 +223,30 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
     response = await request("/api/buy", "POST", { amount: "1", strategyId: 1 }, { Cookie: cookie });
     assert.equal(response.status, 400, "a client-chosen amount is refused (F8)");
     assert.match((await response.json() as { error: string }).error, /configured amount/);
+
+    // WBTC transfer retry: TOTP-gated, only a retryable FAILED row, forks dca.ts --transfers
+    const transferDb = openDb(dbFile);
+    const insertTransfer = transferDb.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, failure, created_at) VALUES (?, ?, ?, '107', 'FAILED', ?, ?)");
+    const wallet = parsePrivateKey(replacementKey).address;
+    const revertedId = Number(insertTransfer.run(wallet, yesterday, destination, "reverted", new Date().toISOString()).lastInsertRowid);
+    const mismatchId = Number(insertTransfer.run(wallet, yesterday, `0x${"cD".repeat(20)}`, "output_mismatch", new Date().toISOString()).lastInsertRowid);
+    transferDb.close();
+    type HistoryState = { transfers: { id: number; status: string }[] };
+    assert.deepEqual(((await (await request("/api/history")).json()) as HistoryState).transfers.map((t) => t.id), [revertedId, mismatchId], "state lists unconfirmed transfers");
+    response = await request(`/api/transfers/${revertedId}/retry`, "POST", {});
+    assert.equal(response.status, 403, "retry needs TOTP");
+    assert.equal((await response.json() as { totpRequired: boolean }).totpRequired, true);
+    assert.equal((await fetch(`${base}/api/transfers/${revertedId}/retry`, { method: "POST", headers: { Cookie: `${session}; ${cookie}`, "Content-Type": "application/json" }, body: "{}" })).status, 400, "retry needs the CSRF marker");
+    assert.equal((await request("/api/transfers/999/retry", "POST", {}, { Cookie: cookie })).status, 404);
+    assert.equal((await request("/api/transfers/1e1/retry", "POST", {}, { Cookie: cookie })).status, 404, "id parsed strictly");
+    response = await request(`/api/transfers/${mismatchId}/retry`, "POST", {}, { Cookie: cookie });
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /output_mismatch is not retryable/);
+    response = await request(`/api/transfers/${revertedId}/retry`, "POST", {}, { Cookie: cookie });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { ok: true });
+    const statusOf = async (id: number) => ((await (await request("/api/history")).json()) as HistoryState).transfers.find((t) => t.id === id)!.status;
+    assert.equal(await statusOf(revertedId), "PENDING", "the retry re-queued the row");
     assert.equal((await request("/api/strategies/2", "PATCH", { status: "completed" })).status, 403);
     assert.equal((await request("/api/strategies/2", "PATCH", { status: "completed" }, { Cookie: cookie })).status, 200);
     assert.equal((await request("/api/strategies/2", "DELETE", {}, { Cookie: cookie })).status, 200);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { summarize, buildReport, buildFundsAlert } from "./report.js";
-import type { Run } from "./db.js";
+import { summarize, buildReport, buildFundsAlert, shouldSendReport } from "./report.js";
+import type { Run, Transfer } from "./db.js";
 
 function run(overrides: Partial<Run>): Run {
   return {
@@ -118,4 +118,33 @@ test("buildFundsAlert: ran-out subject wins, text lists every resource with its 
   assert.match(out.subject, /ran out of POL/);
   assert.match(out.text, /POL: 0 runs left/);
   assert.match(out.text, /USDT0: 1 run left/);
+});
+
+const DEST = "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12";
+const DEST2 = "0x00000000000000000000000000000000000000B2";
+function transfer(overrides: Partial<Transfer>): Transfer {
+  return {
+    id: 1, wallet: "0x000000000000000000000000000000000000000A", date: "2026-09-24", destination: DEST, amount: "107",
+    status: "CONFIRMED", failure: null, attempts: 1, claimedAt: null, nonce: 2, txHash: "0x" + "cd".repeat(32), blockNumber: "2",
+    gasUsed: "50000", gasCostPol: "0.01", gasCostUsd: "0.0010", error: null, createdAt: "2026-09-24T00:00:12.000Z",
+    ...overrides,
+  };
+}
+
+test("buildReport: mixed day lists each WBTC transfer, sent or not", () => {
+  const transfers = [transfer({}), transfer({ id: 2, destination: DEST2, amount: "30", status: "FAILED", failure: "insufficient_wbtc", txHash: null })];
+  const { text, html } = buildReport(run({}), [], [run({})], transfers);
+  assert.ok(text.includes(`Sent 0.00000107 BTC to ${DEST}: https://polygonscan.com/tx/${transfers[0]!.txHash}`));
+  assert.ok(text.includes(`NOT sent 0.00000030 BTC to ${DEST2} (insufficient_wbtc) -- it is in the DCA wallet; retry from the app`));
+  assert.ok(html.includes(DEST2));
+});
+
+test("shouldSendReport: errors mode also sends when a transfer FAILED", () => {
+  const ok = run({});
+  const failedTransfer = [transfer({ status: "FAILED", failure: "reverted" })];
+  assert.equal(shouldSendReport("errors", ok, []), false);
+  assert.equal(shouldSendReport("errors", ok, failedTransfer), true);
+  assert.equal(shouldSendReport("errors", run({ status: "FAILED" }), []), true);
+  assert.equal(shouldSendReport("all", ok, []), true);
+  assert.equal(shouldSendReport("off", ok, failedTransfer), false);
 });

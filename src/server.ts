@@ -19,7 +19,7 @@ import { loadAppConfig, loadMasterKey, loadConfig } from "./config.js";
 import { createRpcClient, getNativeBalance, getErc20Balance, getErc20Allowance } from "./wallet.js";
 import { PERMIT2_ADDRESS } from "./tokens.js";
 import { balanceHealth, averageGasWei, projectedDailyGasWei, GAS_SAMPLE_RUNS } from "./health.js";
-import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
+import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, retryTransfer, isPaused, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import { base32Encode, base32Decode, matchTotp, otpauthUri } from "./totp.js";
 import { Elevations, TotpLockout, ELEVATION_TTL_MS } from "./elevation.js";
@@ -387,7 +387,9 @@ function login(req: IncomingMessage, res: ServerResponse, body: Record<string, u
 }
 
 function buildHistoryResponse(runs: Run[], control: ReturnType<typeof getControl>) {
+  const wallet = walletAddress();
   return {
+    transfers: wallet ? listTransfers(db, { wallet, unconfirmed: true }) : [],
     tiles: summarize(runs),
     control: control
       ? { paused: control.paused, pausedAt: control.pausedAt, pausedUntil: control.pausedUntil, reason: control.reason }
@@ -404,16 +406,19 @@ function buildHistoryResponse(runs: Run[], control: ReturnType<typeof getControl
 // ============================================================
 
 const DCA_ENTRY = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./dca.ts" : "./dca.js", import.meta.url));
-const buyState = { running: false, amount: null as string | null, strategyId: null as number | null, startedAt: null as string | null, exitCode: null as number | null };
+// One child at a time: a manual buy and a transfer retry (dca.ts --transfers) share this state.
+const buyState = { running: false, kind: null as "buy" | "transfers" | null, amount: null as string | null, strategyId: null as number | null, startedAt: null as string | null, exitCode: null as number | null };
 
-function startBuy(amount: string, strategyId: number): void {
-  Object.assign(buyState, { running: true, amount, strategyId, startedAt: new Date().toISOString(), exitCode: null });
-  const child = fork(DCA_ENTRY, ["--manual", "--strategy", String(strategyId)]);
+function startChild(args: string[], meta: { kind: "buy" | "transfers"; amount?: string; strategyId?: number }): void {
+  Object.assign(buyState, { running: true, kind: meta.kind, amount: meta.amount ?? null, strategyId: meta.strategyId ?? null, startedAt: new Date().toISOString(), exitCode: null });
+  const child = fork(DCA_ENTRY, args);
   child.on("exit", (code) => {
     Object.assign(buyState, { running: false, exitCode: code ?? 1 });
-    logger.info("manual buy from the app finished", { amount, exitCode: code });
+    logger.info(meta.kind === "buy" ? "manual buy from the app finished" : "WBTC transfer retry from the app finished", { amount: meta.amount, exitCode: code });
   });
 }
+
+const CHILD_BUSY = "a purchase or transfer is already running";
 
 function dailyTotal(): string {
   const amounts = activeAmounts(db, new Date().toISOString().slice(0, 10));
@@ -640,7 +645,7 @@ const server = createServer((req, res) => {
       return;
     }
     if (buyState.running) {
-      sendJson(res, 409, { error: "a manual buy is already running" });
+      sendJson(res, 409, { error: CHILD_BUSY });
       return;
     }
     postJson(req, res, (body) => {
@@ -658,9 +663,9 @@ const server = createServer((req, res) => {
       const units = manualBuyUnits(db, strategy, AMOUNT_DECIMALS);
       if (units <= 0n) return sendJson(res, 400, { error: "nothing left of the strategy's max total" });
       const amount = formatUnits(units, AMOUNT_DECIMALS);
-      if (buyState.running) return sendJson(res, 409, { error: "a manual buy is already running" });
+      if (buyState.running) return sendJson(res, 409, { error: CHILD_BUSY });
       logger.info("manual buy started from the app", { amount, strategyId });
-      startBuy(amount, strategyId);
+      startChild(["--manual", "--strategy", String(strategyId)], { kind: "buy", amount, strategyId });
       sendJson(res, 202, buyState);
     });
     return;
@@ -790,6 +795,24 @@ const server = createServer((req, res) => {
         notifyDestinationChange(name, current.destination, address);
       }
       sendJson(res, 200, { destination: address });
+    });
+    return;
+  }
+
+  // Re-queue a retryable FAILED WBTC transfer and deliver it now (dca.ts --transfers).
+  const retryRoute = /^\/api\/transfers\/([1-9]\d{0,14})\/retry$/.exec(url.pathname);
+  if (retryRoute && req.method === "POST") {
+    const id = Number(retryRoute[1]);
+    postJson(req, res, (body) => {
+      if (!requireElevation(req, res, body)) return;
+      const wallet = walletAddress();
+      if (!wallet || !listTransfers(db, { wallet }).some((t) => t.id === id)) return sendJson(res, 404, { error: `transfer #${id} not found` });
+      if (buyState.running) return sendJson(res, 409, { error: CHILD_BUSY });
+      const result = retryTransfer(db, id, isPaused(db, new Date().toISOString()));
+      if (!result.ok) return sendJson(res, 409, { error: result.reason });
+      logger.warn("WBTC transfer retry from the app", { id });
+      startChild(["--transfers"], { kind: "transfers" });
+      sendJson(res, 202, { ok: true });
     });
     return;
   }
