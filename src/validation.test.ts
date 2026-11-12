@@ -40,6 +40,8 @@ import {
   SETTINGS_CAPS,
   parseDestination,
   resolveRecipient,
+  planTransfers,
+  assertWbtcConservation,
 } from "./validation.js";
 import { encodeFunctionData as encodeFn, encodeEventTopics, encodeAbiParameters } from "viem";
 
@@ -1050,4 +1052,61 @@ test("resolveRecipient: a destination equal to the (replaced) DCA wallet counts 
 test("resolveRecipient: a corrupt stored destination fails closed (no buy) instead of guessing", () => {
   assertRejects(() => resolveRecipient([DEST.toLowerCase()], WALLET, []), "checksum");
   assertRejects(() => resolveRecipient([DEST, WBTC], WALLET, [WBTC]), "cannot receive");
+});
+
+// ============================================================ mixed destinations: transfers
+
+const DEST3 = "0x0000000000000000000000000000000000000c12";
+
+test("planTransfers: swap delivered in-tx (recipient != wallet) -> no transfers", () => {
+  assert.deepEqual(planTransfers([{ destination: DEST, amountOut: 100n }], DEST, WALLET), []);
+});
+
+test("planTransfers: one transfer per external destination, summed; DCA-wallet and zero shares skipped", () => {
+  assert.deepEqual(
+    planTransfers([
+      { destination: DEST, amountOut: 100n }, { destination: null, amountOut: 50n },
+      { destination: DEST.toLowerCase(), amountOut: 7n }, { destination: DEST2, amountOut: 30n },
+      { destination: DEST3, amountOut: 0n },
+    ], WALLET.toLowerCase(), WALLET),
+    [{ destination: DEST, amount: 107n }, { destination: DEST2, amount: 30n }]
+  );
+});
+
+test("planTransfers + splitShares conserve WBTC to the satoshi (prime amountOut, 3 strategies, mixed)", () => {
+  const shares = [{ strategyId: 1, amountIn: 10n }, { strategyId: 2, amountIn: 10n }, { strategyId: 3, amountIn: 10n }];
+  const dest = [DEST, null, DEST2];
+  const split = splitShares(10_007n, null, null, shares);
+  const withDest = split.map((s, i) => ({ destination: dest[i]!, amountOut: BigInt(s.amountOut) }));
+  const transfers = planTransfers(withDest, WALLET, WALLET);
+  assert.doesNotThrow(() => assertWbtcConservation(10_007n, withDest, transfers, WALLET, WALLET));
+  assert.equal(transfers.reduce((s, t) => s + t.amount, 0n) + withDest[1]!.amountOut, 10_007n);
+});
+
+test("assertWbtcConservation rejects one satoshi more or less, anywhere", () => {
+  const shares = [{ destination: DEST, amountOut: 100n }, { destination: null, amountOut: 50n }];
+  const ok = [{ destination: DEST, amount: 100n }];
+  const check = (amountOut: bigint, transfers: { destination: string; amount: bigint }[]) => () =>
+    assertWbtcConservation(amountOut, shares, transfers, WALLET, WALLET);
+  assert.doesNotThrow(check(150n, ok));
+  assert.doesNotThrow(check(150n, [{ destination: DEST.toLowerCase(), amount: 100n }]), "getAddress compare");
+  assertRejects(check(151n, ok), "amount_out"); // shares short
+  assertRejects(check(149n, ok), "amount_out"); // shares over
+  assertRejects(check(150n, [{ destination: DEST, amount: 101n }]), "transfer");
+  assertRejects(check(150n, [{ destination: DEST, amount: 99n }]), "transfer");
+  assertRejects(check(150n, []), "transfer"); // a share with destination left undelivered
+  assertRejects(check(150n, [...ok, { destination: DEST2, amount: 0n }]), "transfer"); // a destination without shares
+  assertRejects(check(150n, [{ destination: DEST, amount: 50n }, { destination: DEST, amount: 50n }]), "transfer"); // split in two
+});
+
+test("assertWbtcConservation: same-destination day delivered in the swap tx needs no transfer, and allows none", () => {
+  const shares = [{ destination: DEST, amountOut: 60n }, { destination: DEST.toLowerCase(), amountOut: 40n }];
+  assert.doesNotThrow(() => assertWbtcConservation(100n, shares, [], DEST, WALLET));
+  assertRejects(() => assertWbtcConservation(100n, shares, [{ destination: DEST, amount: 100n }], DEST, WALLET), "transfer");
+  assertRejects(() => assertWbtcConservation(101n, shares, [], DEST, WALLET), "amount_out");
+});
+
+test("assertWbtcConservation: a zero share needs no transfer", () => {
+  const shares = [{ destination: DEST, amountOut: 100n }, { destination: DEST2, amountOut: 0n }];
+  assert.doesNotThrow(() => assertWbtcConservation(100n, shares, planTransfers(shares, WALLET, WALLET), WALLET, WALLET));
 });

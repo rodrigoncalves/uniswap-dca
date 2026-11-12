@@ -403,7 +403,8 @@ async function finalize(
     const shares = listRunShares(db, run.wallet, run.date);
     confirmScheduledRun(
       db, run.wallet, run.date, confirmation,
-      splitShares(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares.map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn) })))
+      splitShares(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares.map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn) }))),
+      [] // shortcut: no transfers yet -- a mixed day fails conservation (fail closed) until Task 4 plans them
     );
   } else saver(db, run)(confirmation);
   const completed = completeReachedStrategies(db, todayUtc(), new Date().toISOString(), AMOUNT_DECIMALS);

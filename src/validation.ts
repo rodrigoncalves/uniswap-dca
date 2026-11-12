@@ -895,8 +895,8 @@ export interface ShareResult {
   gasCostUsd: string | null;
 }
 
-const GAS_POL_DECIMALS = 6;
-const GAS_USD_DECIMALS = 4;
+export const GAS_POL_DECIMALS = 6;
+export const GAS_USD_DECIMALS = 4;
 
 /** Splits one confirmed swap's output and gas costs in proportion to input shares. */
 export function splitShares(
@@ -915,6 +915,75 @@ export function splitShares(
     gasCostPol: pol === null ? null : formatUnits(pol.get(share.strategyId)!, GAS_POL_DECIMALS),
     gasCostUsd: usd === null ? null : formatUnits(usd.get(share.strategyId)!, GAS_USD_DECIMALS),
   }));
+}
+
+/**
+ * Mixed-destination day (the swap paid the DCA wallet): one transfer per
+ * external destination, summing its shares. A swap that delivered in-tx
+ * (recipient != wallet) needs none. First-appearance order, zero sums dropped.
+ */
+export function planTransfers(
+  shares: { destination: string | null; amountOut: bigint }[],
+  swapRecipient: string,
+  wallet: string
+): { destination: `0x${string}`; amount: bigint }[] {
+  if (!addressEquals(swapRecipient, wallet)) return [];
+  const sums = new Map<`0x${string}`, bigint>();
+  for (const s of shares) {
+    if (s.destination === null) continue;
+    const d = getAddress(s.destination);
+    sums.set(d, (sums.get(d) ?? 0n) + s.amountOut);
+  }
+  return [...sums].filter(([, amount]) => amount > 0n).map(([destination, amount]) => ({ destination, amount }));
+}
+
+/**
+ * WBTC conservation, exact bigint equality (no more, no less):
+ *   - the shares sum to the swap's amount_out;
+ *   - in-swap delivery (recipient != wallet): no transfers at all;
+ *   - swap to the wallet: transfers + wallet-kept shares == amount_out, and each
+ *     destination with WBTC owed gets exactly one transfer of exactly its shares' sum.
+ */
+export function assertWbtcConservation(
+  amountOut: bigint,
+  shares: { destination: string | null; amountOut: bigint }[],
+  transfers: { destination: string; amount: bigint }[],
+  swapRecipient: string,
+  wallet: string
+): void {
+  const problems: string[] = [];
+  const sum = (values: bigint[]) => values.reduce((a, b) => a + b, 0n);
+  const sharesTotal = sum(shares.map((s) => s.amountOut));
+  if (sharesTotal !== amountOut) problems.push(`amount_out: shares sum to ${sharesTotal}, the swap delivered ${amountOut}`);
+  if (!addressEquals(swapRecipient, wallet)) {
+    if (transfers.length > 0) problems.push(`transfer: swap delivered in-tx to ${swapRecipient}, yet ${transfers.length} transfer(s) planned`);
+    if (problems.length > 0) fail(problems);
+    return;
+  }
+  const kept = sum(shares.filter((s) => s.destination === null).map((s) => s.amountOut));
+  const transferred = sum(transfers.map((t) => t.amount));
+  if (transferred + kept !== amountOut) {
+    problems.push(`transfer: transfers ${transferred} + kept in the DCA wallet ${kept} = ${transferred + kept}, the swap delivered ${amountOut}`);
+  }
+  const owed = new Map<string, bigint>();
+  for (const s of shares) {
+    if (s.destination === null) continue;
+    const d = getAddress(s.destination);
+    owed.set(d, (owed.get(d) ?? 0n) + s.amountOut);
+  }
+  const seen = new Set<string>();
+  for (const t of transfers) {
+    const d = getAddress(t.destination);
+    if (seen.has(d)) problems.push(`transfer: more than one transfer to ${d}`);
+    seen.add(d);
+    const expected = owed.get(d);
+    if (expected === undefined) problems.push(`transfer: ${t.amount} to ${d}, which has no share`);
+    else if (t.amount !== expected || t.amount <= 0n) problems.push(`transfer: ${t.amount} to ${d}, its shares sum to ${expected}`);
+  }
+  for (const [d, expected] of owed) {
+    if (expected > 0n && !seen.has(d)) problems.push(`transfer: shares owe ${expected} to ${d}, but no transfer is planned`);
+  }
+  if (problems.length > 0) fail(problems);
 }
 
 // ============================================================

@@ -12,7 +12,8 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes } from "node:crypto";
-import { toBaseUnits, limitReached, nextShareUnits, formatUnits, type Settings } from "./validation.js";
+import { getAddress } from "viem";
+import { toBaseUnits, limitReached, nextShareUnits, formatUnits, splitShares, assertWbtcConservation, GAS_POL_DECIMALS, GAS_USD_DECIMALS, type Settings } from "./validation.js";
 
 export type RunStatus = "PENDING" | "BROADCAST" | "CONFIRMED" | "FAILED" | "PAUSED";
 
@@ -206,6 +207,19 @@ function migrate(db: DatabaseSync): void {
   if (version < 11 && !(db.prepare("PRAGMA table_info(strategies)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE strategies ADD COLUMN destination TEXT");
   // v12: WBTC destination snapshotted per share at claim. NULL = the DCA wallet.
   if (version < 12 && !(db.prepare("PRAGMA table_info(run_shares)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE run_shares ADD COLUMN destination TEXT");
+  // v12: one ERC-20 transfer per external destination on a mixed day (swap paid the DCA wallet).
+  if (version < 12) db.exec(`
+    CREATE TABLE IF NOT EXISTS transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet TEXT NOT NULL, date TEXT NOT NULL, destination TEXT NOT NULL, amount TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','BROADCAST','CONFIRMED','FAILED')),
+      failure TEXT CHECK (failure IN ('reverted','nonce_consumed','insufficient_wbtc','bad_destination','output_mismatch')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT, nonce INTEGER, tx_hash TEXT, block_number TEXT,
+      gas_used TEXT, gas_cost_pol TEXT, gas_cost_usd TEXT,
+      error TEXT, created_at TEXT NOT NULL,
+      UNIQUE (wallet, date, destination)
+    )`);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   db.exec("COMMIT");
   } catch (err) {
@@ -786,21 +800,194 @@ function writeShareResults(
   }
 }
 
-/** A receipt's successful output and its strategy allocations become visible together. */
+/**
+ * A receipt's successful output, its strategy allocations and the day's
+ * planned transfers (PENDING) become visible together -- only after WBTC
+ * conservation holds against the shares' claim-time destinations.
+ */
 export function confirmScheduledRun(
   db: DatabaseSync, wallet: string, date: string, patch: RunPatch & { status: "CONFIRMED" },
-  results: { strategyId: number; amountOut: string; gasCostPol: string | null; gasCostUsd: string | null }[]
+  results: { strategyId: number; amountOut: string; gasCostPol: string | null; gasCostUsd: string | null }[],
+  transfers: { destination: string; amount: string }[]
 ): void {
   db.exec("BEGIN IMMEDIATE");
   try {
-    if (getRun(db, wallet, date)?.status !== "BROADCAST") throw new Error("scheduled run is not in BROADCAST");
+    const run = getRun(db, wallet, date);
+    if (run?.status !== "BROADCAST") throw new Error("scheduled run is not in BROADCAST");
+    const destinations = new Map(listRunShares(db, wallet, date).map((s) => [s.strategyId, s.destination]));
+    const joined = results.map((r) => {
+      if (!destinations.has(r.strategyId)) throw new Error(`share result for strategy #${r.strategyId} has no claimed share`);
+      return { destination: destinations.get(r.strategyId)!, amountOut: BigInt(r.amountOut) };
+    });
+    // A run without a recorded recipient is treated as paid to the wallet: the strictest rules apply.
+    assertWbtcConservation(BigInt(patch.amountOut!), joined, transfers.map((t) => ({ destination: t.destination, amount: BigInt(t.amount) })), run.recipient ?? wallet, wallet);
     writeShareResults(db, wallet, date, results);
     updateRun(db, wallet, date, patch);
+    const insert = db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, created_at) VALUES (?, ?, ?, ?, 'PENDING', ?)");
+    for (const t of transfers) insert.run(wallet, date, t.destination, t.amount, patch.confirmedAt ?? null);
     db.exec("COMMIT");
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
   }
+}
+
+// ============================================================
+// transfers -- mixed-destination days: the swap paid the DCA wallet, then one
+// ERC-20 transfer per external destination. Never re-broadcast: only the
+// claimer (PENDING -> SENDING) sends, and BROADCAST is recorded before the send.
+// ============================================================
+
+export type TransferStatus = "PENDING" | "SENDING" | "BROADCAST" | "CONFIRMED" | "FAILED";
+export type TransferFailure = "reverted" | "nonce_consumed" | "insufficient_wbtc" | "bad_destination" | "output_mismatch";
+const RETRYABLE: readonly (TransferFailure | null)[] = ["reverted", "nonce_consumed", "insufficient_wbtc"];
+
+export interface Transfer {
+  id: number;
+  wallet: string;
+  date: string;
+  destination: string;
+  amount: string; // WBTC base units
+  status: TransferStatus;
+  failure: TransferFailure | null;
+  attempts: number;
+  claimedAt: string | null;
+  nonce: number | null;
+  txHash: string | null;
+  blockNumber: string | null;
+  gasUsed: string | null; // gas columns: cumulative over attempts
+  gasCostPol: string | null;
+  gasCostUsd: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
+function rowToTransfer(row: Record<string, unknown>): Transfer {
+  return {
+    id: Number(row.id),
+    wallet: row.wallet as string,
+    date: row.date as string,
+    destination: row.destination as string,
+    amount: row.amount as string,
+    status: row.status as TransferStatus,
+    failure: (row.failure as TransferFailure | null) ?? null,
+    attempts: Number(row.attempts),
+    claimedAt: (row.claimed_at as string | null) ?? null,
+    nonce: row.nonce === null || row.nonce === undefined ? null : Number(row.nonce),
+    txHash: (row.tx_hash as string | null) ?? null,
+    blockNumber: (row.block_number as string | null) ?? null,
+    gasUsed: (row.gas_used as string | null) ?? null,
+    gasCostPol: (row.gas_cost_pol as string | null) ?? null,
+    gasCostUsd: (row.gas_cost_usd as string | null) ?? null,
+    error: (row.error as string | null) ?? null,
+    createdAt: row.created_at as string,
+  };
+}
+
+/** `open` = PENDING | SENDING | BROADCAST; `unconfirmed` = anything but CONFIRMED. Ordered by id. */
+export function listTransfers(db: DatabaseSync, opts: { wallet: string; date?: string; open?: boolean; unconfirmed?: boolean }): Transfer[] {
+  const conditions = ["wallet = ?"];
+  const params: string[] = [opts.wallet];
+  if (opts.date !== undefined) {
+    conditions.push("date = ?");
+    params.push(opts.date);
+  }
+  if (opts.open) conditions.push("status IN ('PENDING', 'SENDING', 'BROADCAST')");
+  if (opts.unconfirmed) conditions.push("status <> 'CONFIRMED'");
+  return (db.prepare(`SELECT * FROM transfers WHERE ${conditions.join(" AND ")} ORDER BY id`).all(...params) as Record<string, unknown>[]).map(rowToTransfer);
+}
+
+export function hasOpenTransfers(db: DatabaseSync, wallet: string): boolean {
+  return db.prepare("SELECT 1 FROM transfers WHERE wallet = ? AND status IN ('PENDING', 'SENDING', 'BROADCAST') LIMIT 1").get(wallet) !== undefined;
+}
+
+function inWriteLock<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/**
+ * PENDING -> SENDING for exactly one caller. SENDING claimed before
+ * `staleBeforeIso` goes back to PENDING first: nothing was sent, since
+ * BROADCAST is recorded before the send. BROADCAST is never reclaimed.
+ */
+export function claimTransfer(db: DatabaseSync, id: number, nowIso: string, staleBeforeIso: string): boolean {
+  return inWriteLock(db, () => {
+    db.prepare("UPDATE transfers SET status = 'PENDING' WHERE status = 'SENDING' AND claimed_at < ?").run(staleBeforeIso);
+    const result = db.prepare("UPDATE transfers SET status = 'SENDING', claimed_at = ?, attempts = attempts + 1 WHERE id = ? AND status = 'PENDING'").run(nowIso, id);
+    return result.changes === 1;
+  });
+}
+
+export function updateTransfer(
+  db: DatabaseSync, id: number,
+  patch: { status?: "PENDING" | "BROADCAST" | "FAILED"; failure?: TransferFailure | null; nonce?: number; txHash?: string; error?: string | null }
+): void {
+  const snake = { status: "status", failure: "failure", nonce: "nonce", txHash: "tx_hash", error: "error" } as const;
+  const entries = Object.entries(patch).filter(([, value]) => value !== undefined) as [keyof typeof snake, string | number | null][];
+  if (entries.length === 0) return;
+  const result = db.prepare(`UPDATE transfers SET ${entries.map(([key]) => `${snake[key]} = ?`).join(", ")} WHERE id = ?`).run(...entries.map(([, v]) => v), id);
+  if (result.changes !== 1) throw new Error(`transfer #${id} not found`);
+}
+
+function addDecimal(current: string | null, delta: string, decimals: number): string {
+  return formatUnits(toBaseUnits(current ?? "0", decimals) + toBaseUnits(delta, decimals), decimals);
+}
+
+/**
+ * A mined transfer (success or revert), once: BROADCAST -> CONFIRMED/FAILED.
+ * Its gas is added to the transfer (cumulative over retries) and to the run's
+ * shares with that destination, split by amountIn. Wallet-kept shares never pay.
+ */
+export function recordTransferReceipt(
+  db: DatabaseSync, id: number,
+  receipt: { status: "CONFIRMED" | "FAILED"; failure: TransferFailure | null; error: string | null; blockNumber: string; gasUsed: string; gasCostPol: string; gasCostUsd: string }
+): void {
+  inWriteLock(db, () => {
+    const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`transfer #${id} not found`);
+    const t = rowToTransfer(row);
+    if (t.status !== "BROADCAST") throw new Error(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
+    db.prepare(
+      `UPDATE transfers SET status = ?, failure = ?, error = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
+    ).run(
+      receipt.status, receipt.failure, receipt.error, receipt.blockNumber,
+      (BigInt(t.gasUsed ?? "0") + BigInt(receipt.gasUsed)).toString(),
+      addDecimal(t.gasCostPol, receipt.gasCostPol, GAS_POL_DECIMALS),
+      addDecimal(t.gasCostUsd, receipt.gasCostUsd, GAS_USD_DECIMALS),
+      id
+    );
+    const destination = getAddress(t.destination);
+    const shares = listRunShares(db, t.wallet, t.date).filter((s) => s.destination !== null && getAddress(s.destination) === destination);
+    const parts = splitShares(0n, receipt.gasCostPol, receipt.gasCostUsd, shares.map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn) })));
+    const update = db.prepare("UPDATE run_shares SET gas_cost_pol = ?, gas_cost_usd = ? WHERE strategy_id = ? AND wallet = ? AND date = ?");
+    parts.forEach((part, i) => {
+      const share = shares[i]!;
+      update.run(addDecimal(share.gasCostPol, part.gasCostPol!, GAS_POL_DECIMALS), addDecimal(share.gasCostUsd, part.gasCostUsd!, GAS_USD_DECIMALS), share.strategyId, t.wallet, t.date);
+    });
+  });
+}
+
+/** FAILED with a retryable failure -> PENDING, same amount; gas and attempts kept, the last tx noted in `error`. */
+export function retryTransfer(db: DatabaseSync, id: number, paused: boolean): { ok: true } | { ok: false; reason: string } {
+  return inWriteLock(db, () => {
+    if (paused) return { ok: false, reason: "DCA is paused -- resume first" };
+    const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    if (!row || row.status !== "FAILED") return { ok: false, reason: "only a failed transfer can be retried" };
+    const t = rowToTransfer(row);
+    if (!RETRYABLE.includes(t.failure)) return { ok: false, reason: `${t.failure} is not retryable -- inspect it by hand` };
+    db.prepare(
+      "UPDATE transfers SET status = 'PENDING', failure = NULL, nonce = NULL, tx_hash = NULL, block_number = NULL, claimed_at = NULL, error = ? WHERE id = ?"
+    ).run(`retry after ${t.txHash ?? "no tx"}: ${t.error}`, id);
+    return { ok: true };
+  });
 }
 
 /** One strategy's history: its share of each scheduled swap (runs fields + the share's amounts) and its manual buys. */

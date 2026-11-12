@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination } from "./db.js";
+import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer } from "./db.js";
 import { assertPrivateKeyUnchanged, loadPrivateKey, storePrivateKey } from "./setup.js";
-import { parsePrivateKey } from "./validation.js";
+import { parsePrivateKey, splitShares, ValidationError } from "./validation.js";
 
 const WALLET = "0x000000000000000000000000000000000000000A";
 
@@ -596,10 +596,10 @@ test("confirmScheduledRun: status and share output commit together or roll back 
   updateRun(db, WALLET, TODAY, { status: "BROADCAST", amountIn: "10000000" });
   const patch = { status: "CONFIRMED" as const, amountOut: "11837" };
   const result = { strategyId: id, amountOut: "11837", gasCostPol: "0.01", gasCostUsd: "0.001" };
-  assert.throws(() => confirmScheduledRun(db, WALLET, TODAY, patch, [{ ...result, strategyId: id + 1 }]), /share/);
+  assert.throws(() => confirmScheduledRun(db, WALLET, TODAY, patch, [{ ...result, strategyId: id + 1 }], []), /share/);
   assert.equal(getRun(db, WALLET, TODAY)?.status, "BROADCAST");
   assert.equal(listRunShares(db, WALLET, TODAY)[0]?.amountOut, null);
-  confirmScheduledRun(db, WALLET, TODAY, patch, [result]);
+  confirmScheduledRun(db, WALLET, TODAY, patch, [result], []);
   assert.equal(getRun(db, WALLET, TODAY)?.status, "CONFIRMED");
   assert.equal(listRunShares(db, WALLET, TODAY)[0]?.amountOut, "11837");
   db.close();
@@ -984,4 +984,180 @@ test("migrate v11 -> v12: existing shares get destination NULL", () => {
   assert.equal(listRunShares(db, WALLET, "2026-11-12")[0]!.destination, null);
   db.close();
   rmSync(dir, { recursive: true });
+});
+
+// ============================================================ mixed destinations: transfers
+
+const MIX_DATE = "2026-11-12";
+const MIX_DEST = "0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12";
+const CONFIRMED_AT = "2026-11-12T00:05:00.000Z";
+const H = 60 * 60 * 1000;
+const at = (ms: number) => new Date(Date.parse(CONFIRMED_AT) + ms).toISOString();
+
+/** Shares: #1 MIX_DEST amountIn 10_000000, #2 MIX_DEST 30_000000, #3 DCA wallet 5_000000; BROADCAST to the wallet (mixed day). */
+function mixedDay(db: DatabaseSync) {
+  const [a, b] = withStrategies(db, "10", "30", "5");
+  setStrategyDestination(db, a!, MIX_DEST);
+  setStrategyDestination(db, b!, MIX_DEST);
+  claimScheduledRun(db, WALLET, MIX_DATE, T0, 6);
+  updateRun(db, WALLET, MIX_DATE, { status: "BROADCAST", amountIn: "45000000", recipient: WALLET });
+  const shares = listRunShares(db, WALLET, MIX_DATE).map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn) }));
+  const results = splitShares(4500n, "0.004500", "0.0009", shares); // 1000/3000/500 sat; 0.001000/0.003000/0.000500 POL
+  const patch = { status: "CONFIRMED" as const, amountOut: "4500", confirmedAt: CONFIRMED_AT };
+  return { patch, results, transfers: [{ destination: MIX_DEST, amount: "4000" }] };
+}
+
+function countTransfers(db: DatabaseSync): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM transfers").get() as { n: number }).n;
+}
+
+function confirmedMixedDay(db: DatabaseSync): number {
+  const { patch, results, transfers } = mixedDay(db);
+  confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, transfers);
+  return listTransfers(db, { wallet: WALLET })[0]!.id;
+}
+
+function broadcast(db: DatabaseSync, id: number, nowIso: string, nonce: number, txHash: string): void {
+  assert.equal(claimTransfer(db, id, nowIso, at(-H)), true);
+  updateTransfer(db, id, { status: "BROADCAST", nonce, txHash });
+}
+
+test("migrate v12: transfers table with its status/failure checks and one row per (wallet, date, destination)", () => {
+  const db = openDb(":memory:");
+  const insert = (status: string, failure: string | null, destination = MIX_DEST) =>
+    db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, failure, created_at) VALUES (?, ?, ?, '1', ?, ?, ?)").run(WALLET, MIX_DATE, destination, status, failure, CONFIRMED_AT);
+  assert.throws(() => insert("DONE", null), /CHECK/);
+  assert.throws(() => insert("FAILED", "oops"), /CHECK/);
+  insert("PENDING", null);
+  assert.throws(() => insert("PENDING", null), /UNIQUE/);
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.attempts, 0);
+  db.close();
+});
+
+test("confirmScheduledRun writes PENDING transfers atomically; rolled back with the share results", () => {
+  const db = openDb(":memory:");
+  const { patch, results, transfers } = mixedDay(db);
+  // created_at NOT NULL fails on the transfer insert, AFTER the share writes: all of it rolls back
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, { ...patch, confirmedAt: undefined }, results, transfers), /NOT NULL/);
+  assert.equal(getRun(db, WALLET, MIX_DATE)?.status, "BROADCAST");
+  assert.deepEqual(listRunShares(db, WALLET, MIX_DATE).map((s) => s.amountOut), [null, null, null]);
+  assert.equal(countTransfers(db), 0);
+  assert.equal(hasOpenTransfers(db, WALLET), false);
+
+  confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, transfers);
+  assert.equal(getRun(db, WALLET, MIX_DATE)?.status, "CONFIRMED");
+  assert.deepEqual(listRunShares(db, WALLET, MIX_DATE).map((s) => s.amountOut), ["1000", "3000", "500"]);
+  const [t] = listTransfers(db, { wallet: WALLET, date: MIX_DATE });
+  assert.deepEqual(
+    { ...t, id: undefined },
+    { id: undefined, wallet: WALLET, date: MIX_DATE, destination: MIX_DEST, amount: "4000", status: "PENDING", failure: null, attempts: 0, claimedAt: null, nonce: null, txHash: null, blockNumber: null, gasUsed: null, gasCostPol: null, gasCostUsd: null, error: null, createdAt: CONFIRMED_AT }
+  );
+  assert.equal(hasOpenTransfers(db, WALLET), true);
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, transfers), /BROADCAST/, "no second confirm");
+  assert.equal(countTransfers(db), 1);
+  db.close();
+});
+
+test("confirmScheduledRun refuses (and writes nothing) when shares or transfers don't sum to amount_out", () => {
+  const db = openDb(":memory:");
+  const { patch, results, transfers } = mixedDay(db);
+  const unchanged = () => {
+    assert.equal(getRun(db, WALLET, MIX_DATE)?.status, "BROADCAST");
+    assert.equal(getRun(db, WALLET, MIX_DATE)?.amountOut, null);
+    assert.deepEqual(listRunShares(db, WALLET, MIX_DATE).map((s) => s.amountOut), [null, null, null]);
+    assert.equal(countTransfers(db), 0);
+  };
+  const shortShares = results.map((r, i) => (i === 2 ? { ...r, amountOut: "499" } : r)); // sums to 4499
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, shortShares, [{ destination: MIX_DEST, amount: "4000" }]), (e: unknown) => e instanceof ValidationError && /amount_out/.test(e.message));
+  unchanged();
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, [{ destination: MIX_DEST, amount: "4001" }]), (e: unknown) => e instanceof ValidationError && /transfer/.test(e.message));
+  unchanged();
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, []), /transfer/, "mixed day with the destination's WBTC left undelivered");
+  unchanged();
+  confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, transfers);
+  assert.equal(countTransfers(db), 1);
+  db.close();
+});
+
+test("confirmScheduledRun: same-destination day delivered in the swap tx -- no transfers, and none accepted", () => {
+  const db = openDb(":memory:");
+  const { patch, results } = mixedDay(db);
+  setStrategyDestination(db, 3, MIX_DEST);
+  db.prepare("UPDATE run_shares SET destination = ?").run(MIX_DEST);
+  updateRun(db, WALLET, MIX_DATE, { recipient: MIX_DEST });
+  assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, [{ destination: MIX_DEST, amount: "4500" }]), /transfer/);
+  confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, []);
+  assert.equal(getRun(db, WALLET, MIX_DATE)?.status, "CONFIRMED");
+  assert.equal(countTransfers(db), 0);
+  db.close();
+});
+
+test("claimTransfer: only one claimer wins; stale SENDING returns to PENDING", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  assert.equal(claimTransfer(db, id, CONFIRMED_AT, at(-H)), true);
+  assert.equal(claimTransfer(db, id, CONFIRMED_AT, at(-H)), false, "second process loses");
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "SENDING");
+  assert.equal(claimTransfer(db, id, at(30 * 60 * 1000), at(-30 * 60 * 1000)), false, "SENDING not yet stale");
+  assert.equal(claimTransfer(db, id, at(2 * H), at(H)), true, "stale SENDING reclaimed");
+  const t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.attempts, t.claimedAt], [2, at(2 * H)]);
+  updateTransfer(db, id, { status: "BROADCAST", nonce: 9, txHash: "0xaa" });
+  assert.equal(claimTransfer(db, id, at(5 * H), at(4 * H)), false, "BROADCAST is never reclaimed -- it may be on chain");
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "BROADCAST");
+  db.close();
+});
+
+test("recordTransferReceipt charges real gas to that destination's shares by amountIn, cumulative over attempts", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  assert.throws(() => recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" }), /BROADCAST/, "a receipt is charged once");
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  broadcast(db, id, at(H), 8, "0xbb");
+  recordTransferReceipt(db, id, { status: "CONFIRMED", failure: null, error: null, blockNumber: "2", gasUsed: "50000", gasCostPol: "0.000800", gasCostUsd: "0.0004" });
+  const shares = listRunShares(db, WALLET, MIX_DATE);
+  assert.deepEqual(shares.map((s) => s.gasCostPol), ["0.001300", "0.003900", "0.000500"]); // +0.0012 split 1:3; #3 untouched
+  assert.deepEqual(shares.map((s) => s.gasCostUsd), ["0.0003", "0.0011", "0.0001"]); // 0.0002 -> 0/2 (remainder to the largest), 0.0004 -> 1/3
+  assert.deepEqual(shares.map((s) => s.amountOut), ["1000", "3000", "500"], "amount_out unchanged");
+  const t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.failure, t.blockNumber, t.txHash, t.attempts, t.gasUsed, t.gasCostPol, t.gasCostUsd], ["CONFIRMED", null, "2", "0xbb", 2, "80000", "0.001200", "0.0006"]);
+  assert.equal(hasOpenTransfers(db, WALLET), false);
+  assert.deepEqual(listTransfers(db, { wallet: WALLET, unconfirmed: true }), []);
+  db.close();
+});
+
+test("retryTransfer: refuses while paused, non-FAILED, and output_mismatch / bad_destination; resets a reverted one", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
+  recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "boom", blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  for (const failure of ["output_mismatch", "bad_destination"] as const) {
+    updateTransfer(db, id, { failure });
+    assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: `${failure} is not retryable -- inspect it by hand` });
+  }
+  updateTransfer(db, id, { failure: "reverted" });
+  assert.deepEqual(listTransfers(db, { wallet: WALLET, open: true }), []);
+  assert.equal(listTransfers(db, { wallet: WALLET, unconfirmed: true }).length, 1);
+  assert.deepEqual(retryTransfer(db, id, true), { ok: false, reason: "DCA is paused -- resume first" });
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "FAILED", "paused refusal changes nothing");
+
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  const t = listTransfers(db, { wallet: WALLET, open: true })[0]!;
+  assert.deepEqual(
+    [t.status, t.failure, t.nonce, t.txHash, t.blockNumber, t.claimedAt, t.error, t.attempts, t.amount, t.gasUsed, t.gasCostPol, t.gasCostUsd],
+    ["PENDING", null, null, null, null, null, "retry after 0xaa: boom", 1, "4000", "30000", "0.000400", "0.0002"]
+  );
+  assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
+  for (const failure of ["nonce_consumed", "insufficient_wbtc"] as const) {
+    updateTransfer(db, id, { status: "FAILED", failure, error: "e" });
+    assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+    assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after no tx: e");
+  }
+  assert.deepEqual(listTransfers(db, { wallet: "0x0000000000000000000000000000000000000B0b" }), []);
+  assert.deepEqual(listTransfers(db, { wallet: WALLET, date: "2026-11-11" }), []);
+  db.close();
 });
