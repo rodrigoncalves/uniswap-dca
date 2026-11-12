@@ -49,7 +49,7 @@ export interface Run {
   createdAt?: string;
 }
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 const COLUMNS: { camel: keyof Run; snake: string }[] = [
   { camel: "wallet", snake: "wallet" },
@@ -204,6 +204,8 @@ function migrate(db: DatabaseSync): void {
   if (version < 10 && !(db.prepare("PRAGMA table_info(report_pref)").all() as { name: string }[]).some((c) => c.name === "alert_days")) db.exec("ALTER TABLE report_pref ADD COLUMN alert_days INTEGER NOT NULL DEFAULT 2 CHECK (alert_days BETWEEN 0 AND 30)");
   // v11: optional WBTC destination per strategy (F17, DECISIONS.md #33). NULL = the DCA wallet.
   if (version < 11 && !(db.prepare("PRAGMA table_info(strategies)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE strategies ADD COLUMN destination TEXT");
+  // v12: WBTC destination snapshotted per share at claim. NULL = the DCA wallet.
+  if (version < 12 && !(db.prepare("PRAGMA table_info(run_shares)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE run_shares ADD COLUMN destination TEXT");
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   db.exec("COMMIT");
   } catch (err) {
@@ -503,6 +505,7 @@ export interface RunShare {
   amountOut: string | null;
   gasCostPol: string | null;
   gasCostUsd: string | null;
+  destination: string | null; // claim-time snapshot of the strategy's destination, NULL = the DCA wallet
 }
 
 function rowToStrategy(row: Record<string, unknown>): Strategy {
@@ -528,6 +531,7 @@ function rowToShare(row: Record<string, unknown>): RunShare {
     amountOut: (row.amount_out as string | null) ?? null,
     gasCostPol: (row.gas_cost_pol as string | null) ?? null,
     gasCostUsd: (row.gas_cost_usd as string | null) ?? null,
+    destination: (row.destination as string | null) ?? null,
   };
 }
 
@@ -714,14 +718,15 @@ export function claimScheduledRun(db: DatabaseSync, wallet: string, date: string
     const picked = (
       db
         .prepare(
-          `SELECT id, amount, max_total FROM strategies
+          `SELECT id, amount, max_total, destination FROM strategies
            WHERE status = 'active' AND id NOT IN (SELECT strategy_id FROM run_shares WHERE date = ?)
            ORDER BY id`
         )
-        .all(date) as { id: number; amount: string; max_total: string | null }[]
+        .all(date) as { id: number; amount: string; max_total: string | null; destination: string | null }[]
     )
       .map((p) => ({
         id: Number(p.id),
+        destination: p.destination ?? null,
         units: nextShareUnits(
           toBaseUnits(p.amount, decimalsIn),
           p.max_total === null ? null : toBaseUnits(p.max_total, decimalsIn),
@@ -734,11 +739,11 @@ export function claimScheduledRun(db: DatabaseSync, wallet: string, date: string
       return { kind: "nothing-to-buy" };
     }
     db.prepare("INSERT INTO runs (wallet, date, status) VALUES (?, ?, 'PENDING')").run(wallet, date);
-    const insert = db.prepare("INSERT INTO run_shares (strategy_id, wallet, date, amount_in) VALUES (?, ?, ?, ?)");
+    const insert = db.prepare("INSERT INTO run_shares (strategy_id, wallet, date, amount_in, destination) VALUES (?, ?, ?, ?, ?)");
     const shares: RunShare[] = picked.map((p) => {
       const amountIn = p.units.toString();
-      insert.run(p.id, wallet, date, amountIn);
-      return { strategyId: p.id, wallet, date, amountIn, amountOut: null, gasCostPol: null, gasCostUsd: null };
+      insert.run(p.id, wallet, date, amountIn, p.destination);
+      return { strategyId: p.id, wallet, date, amountIn, amountOut: null, gasCostPol: null, gasCostUsd: null, destination: p.destination };
     });
     db.exec("COMMIT");
     return { kind: "claimed", shares };

@@ -48,7 +48,7 @@ test("migrate: concurrent first opens of one file serialize the version check", 
       child.on("error", reject);
     })));
     const db = openDb(path);
-    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+    assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
     db.close();
   } finally {
     rmSync(path, { force: true });
@@ -416,7 +416,7 @@ test("migrate v4: a v3 database gains secrets and auth_state without losing runs
   assert.equal(getRun(db, WALLET, "2026-09-20")?.status, "CONFIRMED");
   putSecret(db, "totp_secret", "b");
   assert.equal(claimTotpStep(db, 1), true);
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
   db.close();
   rmSync(path, { force: true });
 });
@@ -699,7 +699,7 @@ test("migrate v5: v4 history becomes strategy #1's (shares at 100%, manual rows)
   assert.deepEqual(shares.map((s) => [s.strategyId, s.amountIn, s.amountOut, s.gasCostUsd]), [[1, "10000000", "11838", "0.0070"]]);
   assert.equal((db.prepare("SELECT strategy_id FROM manual_runs").get() as { strategy_id: number }).strategy_id, 1);
   assert.equal(isPaused(db, "2026-09-24T00:00:00Z"), true, "pause survives the re-key");
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
   db.close();
   rmSync(path, { force: true });
 });
@@ -760,7 +760,7 @@ test("migrate v5: failure rolls back schema changes and leaves v4 restartable", 
   raw.close();
 
   const recovered = openDb(path);
-  assert.equal((recovered.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 11);
+  assert.equal((recovered.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
   assert.equal(getControl(recovered)?.paused, true);
   recovered.close();
   rmSync(path, { force: true });
@@ -954,6 +954,34 @@ test("migrate v10 -> v11: existing strategies start with no destination", () => 
   raw.close();
   const db = openDb(file);
   assert.equal(getStrategy(db, a!)!.destination, null);
+  db.close();
+  rmSync(dir, { recursive: true });
+});
+
+test("claimScheduledRun snapshots each strategy's destination into its share (v12)", () => {
+  const DEST = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+  const db = openDb(":memory:");
+  withStrategies(db, "10", "5");
+  setStrategyDestination(db, 1, DEST);
+  assert.equal(claimScheduledRun(db, WALLET, "2026-11-12", "2026-11-12T10:00:00.000Z", 6).kind, "claimed");
+  assert.deepEqual(listRunShares(db, WALLET, "2026-11-12").map((s) => s.destination), [DEST, null]);
+  setStrategyDestination(db, 1, null); // edited after the claim
+  assert.equal(listRunShares(db, WALLET, "2026-11-12")[0]!.destination, DEST, "snapshot, not live value");
+  db.close();
+});
+
+test("migrate v11 -> v12: existing shares get destination NULL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dca-share-dest-mig-"));
+  const file = join(dir, "t.db");
+  const first = openDb(file);
+  withStrategies(first, "10");
+  claimScheduledRun(first, WALLET, "2026-11-12", "2026-11-12T10:00:00.000Z", 6);
+  first.close();
+  const raw = new DatabaseSync(file);
+  raw.exec("ALTER TABLE run_shares DROP COLUMN destination; PRAGMA user_version = 11;");
+  raw.close();
+  const db = openDb(file);
+  assert.equal(listRunShares(db, WALLET, "2026-11-12")[0]!.destination, null);
   db.close();
   rmSync(dir, { recursive: true });
 });
