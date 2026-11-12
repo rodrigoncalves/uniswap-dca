@@ -617,7 +617,7 @@ async function loadHealth() {
   const allowance = Number(b.allowance) > 1e12 ? "unlimited" : `${fmt(b.allowance)} USDT0`;
   const rows = [
     [h.tokenIn.status, `USDT0: ${fmt(b.tokenIn)} for ${fmt(b.dailyNeed)}/day${covers(h.tokenIn)}`],
-    [h.gas.status, `POL (gas): ${fmt(b.pol, 4)}${b.avgGasPol ? ` · ~${fmt(b.avgGasPol, 4)} per run` : ""}${covers(h.gas)}${h.gas.status === "critical" ? ` · below the ${b.minPol} POL minimum` : ""}`],
+    [h.gas.status, `POL (gas): ${fmt(b.pol, 4)}${b.avgGasPol ? ` · ~${fmt(b.avgGasPol, 4)} per day${b.transfersPerDay ? ` (swap + ${b.transfersPerDay} transfer${b.transfersPerDay > 1 ? "s" : ""})` : ""}` : ""}${covers(h.gas)}${h.gas.status === "critical" ? ` · below the ${b.minPol} POL minimum` : ""}`],
     [h.allowance.status, `Allowance to Permit2: ${allowance}${h.allowance.status === "warning" ? " · the next run approves again (extra gas)" : ""}`],
   ];
   el.innerHTML = rows.map(([status, text]) => `<div class="${escapeText(status)}"><span class="dot" aria-hidden="true"></span>${escapeText(text)} <span class="reason">(${escapeText(status)})</span></div>`).join("")

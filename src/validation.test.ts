@@ -41,6 +41,7 @@ import {
   SETTINGS_CAPS,
   parseDestination,
   resolveRecipient,
+  expectedTransfersPerDay,
   planTransfers,
   assertWbtcConservation,
 } from "./validation.js";
@@ -1169,4 +1170,12 @@ test("assertWbtcConservation: same-destination day delivered in the swap tx need
 test("assertWbtcConservation: a zero share needs no transfer", () => {
   const shares = [{ destination: DEST, amountOut: 100n }, { destination: DEST2, amountOut: 0n }];
   assert.doesNotThrow(() => assertWbtcConservation(100n, shares, planTransfers(shares, WALLET, WALLET), WALLET, WALLET));
+});
+
+test("expectedTransfersPerDay: same/none -> 0; mixed -> distinct external destinations", () => {
+  const X = [USDT0, WBTC];
+  assert.equal(expectedTransfersPerDay([DEST, DEST], WALLET, X), 0);
+  assert.equal(expectedTransfersPerDay([null, null], WALLET, X), 0);
+  assert.equal(expectedTransfersPerDay([DEST, null, DEST], WALLET, X), 1);
+  assert.equal(expectedTransfersPerDay([DEST, DEST2, null], WALLET, X), 2);
 });

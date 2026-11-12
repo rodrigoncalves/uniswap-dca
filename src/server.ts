@@ -18,13 +18,13 @@ import { fileURLToPath } from "node:url";
 import { loadAppConfig, loadMasterKey, loadConfig } from "./config.js";
 import { createRpcClient, getNativeBalance, getErc20Balance, getErc20Allowance } from "./wallet.js";
 import { PERMIT2_ADDRESS } from "./tokens.js";
-import { balanceHealth, averageGasWei, GAS_SAMPLE_RUNS } from "./health.js";
-import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
+import { balanceHealth, averageGasWei, projectedDailyGasWei, GAS_SAMPLE_RUNS } from "./health.js";
+import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import { base32Encode, base32Decode, matchTotp, otpauthUri } from "./totp.js";
 import { Elevations, TotpLockout, ELEVATION_TTL_MS } from "./elevation.js";
 import { summarize, sendReport } from "./report.js";
-import { parseStrategyInput, parsePrivateKey, assertRunTotal, amountToUnits, formatUnits, limitReached, AMOUNT_DECIMALS, MAX_RUN_TOTAL, ValidationError, validateSettings, SETTINGS_CAPS, parseDestination } from "./validation.js";
+import { parseStrategyInput, parsePrivateKey, assertRunTotal, amountToUnits, formatUnits, limitReached, AMOUNT_DECIMALS, MAX_RUN_TOTAL, ValidationError, validateSettings, SETTINGS_CAPS, parseDestination, expectedTransfersPerDay } from "./validation.js";
 import { seedFromEnv, loadPrivateKey, storePrivateKey, SetupError, setupIssues } from "./setup.js";
 import { logger, registerSecret } from "./logger.js";
 
@@ -106,7 +106,12 @@ async function balanceResponse() {
   const nowIso = new Date().toISOString();
   const today = nowIso.slice(0, 10);
   const dailyNeedUnits = activeAmounts(db, today).reduce((sum, amount) => sum + amountToUnits(amount), 0n);
-  const avgGasWei = averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS));
+  let transfersPerDay = 0;
+  try {
+    const active = listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= today));
+    transfersPerDay = expectedTransfersPerDay(active.map((s) => s.destination), address, rpc ? [rpc.tokenIn, rpc.tokenOut] : []);
+  } catch { /* corrupt stored destination: the run fails closed on it and `npm run check` reports it */ }
+  const avgGasWei = projectedDailyGasWei(averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS)), averageGasWei(recentTransferGasCostsPol(db, GAS_SAMPLE_RUNS)), transfersPerDay);
   const settings = getSettings(db);
   const minPolWei = BigInt(Math.round((settings?.minPolBalance ?? 0) * 1e18)); // same conversion as dca.ts
   return {
@@ -116,6 +121,7 @@ async function balanceResponse() {
     pol: formatUnits(reads.pol, 18),
     allowance: formatUnits(reads.allowance, AMOUNT_DECIMALS),
     dailyNeed: formatUnits(dailyNeedUnits, AMOUNT_DECIMALS),
+    transfersPerDay,
     avgGasPol: avgGasWei === null ? null : formatUnits(avgGasWei, 18),
     minPol: formatUnits(minPolWei, 18),
     health: balanceHealth({ tokenInUnits: reads.tokenIn, dailyNeedUnits, polWei: reads.pol, minPolWei, avgGasWei, allowanceUnits: reads.allowance, nowIso, runTime: settings?.runTime ?? "00:00" }),

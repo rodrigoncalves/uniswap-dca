@@ -1172,6 +1172,13 @@ export function resolveRecipient(
   return { recipient: wallet, mixed: true };
 }
 
+/** WBTC transfers a day of these (active) destinations needs: 0 unless mixed, else the distinct external ones. */
+export function expectedTransfersPerDay(destinations: readonly (string | null)[], wallet: `0x${string}`, extraForbidden: readonly string[]): number {
+  if (!resolveRecipient(destinations, wallet, extraForbidden).mixed) return 0;
+  const self = getAddress(wallet);
+  return new Set(destinations.map((d) => parseDestination(d, { dcaWallet: null, extraForbidden })).filter((a) => a !== null && a !== self)).size;
+}
+
 // ============================================================
 // private key (F1d) -- the ONLY place a key typed into the app is checked.
 // The error message never contains the input (README.md invariant #3).

@@ -61,6 +61,12 @@ export function averageGasWei(costsPol: string[]): bigint | null {
   return costsPol.reduce((sum, cost) => sum + toBaseUnits(cost, 18), 0n) / BigInt(costsPol.length);
 }
 
+/** Expected gas per day: the swap plus one transfer per mixed-day destination. No transfer history -> the swap average (never under-counts). */
+export function projectedDailyGasWei(swapAvgWei: bigint | null, transferAvgWei: bigint | null, transfersPerDay: number): bigint | null {
+  if (swapAvgWei === null) return null;
+  return swapAvgWei + BigInt(transfersPerDay) * (transferAvgWei ?? swapAvgWei);
+}
+
 export interface FundsAlertItem { resource: "USDT0" | "POL"; runwayDays: number; runsOutOn: string }
 
 /** Low-funds email (after the scheduled run): resources lasting <= alertDays runs; a run that can't be paid (0) always counts. */

@@ -308,6 +308,12 @@ export function recentGasCostsPol(db: DatabaseSync, limit: number): string[] {
   return rows.map((row) => row.gas_cost_pol);
 }
 
+/** gas_cost_pol of the latest CONFIRMED transfers, newest first; cumulative, so earlier reverted attempts count. */
+export function recentTransferGasCostsPol(db: DatabaseSync, limit: number): string[] {
+  const rows = db.prepare("SELECT gas_cost_pol FROM transfers WHERE status = 'CONFIRMED' AND gas_cost_pol IS NOT NULL ORDER BY date DESC, id DESC LIMIT ?").all(limit) as { gas_cost_pol: string }[];
+  return rows.map((row) => row.gas_cost_pol);
+}
+
 function update(db: DatabaseSync, table: string, where: string, keys: (string | number)[], patch: RunPatch): void {
   const entries = Object.entries(patch).filter(([, value]) => value !== undefined);
   if (entries.length === 0) return;

@@ -34,7 +34,7 @@ import { loadConfig, loadMasterKey, type Config } from "./config.js";
 import {
   openDb, getRun, updateRun, isPaused, listRuns, setPaused, updateManualRun, listManualRuns, listAllRuns,
   claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, getStrategy, activeAmounts, completeReachedStrategies, manualBuyUnits,
-  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, listStrategies, type Run, type RunPatch, type Strategy,
+  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, recentTransferGasCostsPol, listStrategies, type Run, type RunPatch, type Strategy,
   listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, TransferStaleError, type Transfer, type TransferFailure,
 } from "./db.js";
 import { seedSettingsAndStrategyFromEnv, seedPrivateKeyFromEnv, loadSettings, loadPrivateKey, assertPrivateKeyUnchanged, settingsFromEnv, SetupError } from "./setup.js";
@@ -90,11 +90,12 @@ import {
   parsePrivateKey,
   resolveRecipient,
   parseDestination,
+  expectedTransfersPerDay,
 } from "./validation.js";
 import { UNIVERSAL_ROUTERS, CHAINLINK_FEEDS, PERMIT2_ADDRESS } from "./tokens.js";
 import { logger, registerSecret } from "./logger.js";
 import { buildReport, buildFundsAlert, sendReport } from "./report.js";
-import { balanceHealth, averageGasWei, fundsAlert, GAS_SAMPLE_RUNS } from "./health.js";
+import { balanceHealth, averageGasWei, projectedDailyGasWei, fundsAlert, GAS_SAMPLE_RUNS } from "./health.js";
 
 type Client = ReturnType<typeof createRpcClient>;
 type Account = ReturnType<typeof getAccount>;
@@ -791,7 +792,13 @@ async function emailFundsAlert(config: Config, db: DatabaseSync, client: Client,
       dailyNeedUnits: activeAmounts(db, nowIso.slice(0, 10)).reduce((sum, a) => sum + toBaseUnits(a, AMOUNT_DECIMALS), 0n),
       polWei,
       minPolWei: BigInt(Math.round((settings?.minPolBalance ?? 0) * 10 ** POL_DECIMALS)),
-      avgGasWei: averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS)),
+      avgGasWei: projectedDailyGasWei(
+        averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS)),
+        averageGasWei(recentTransferGasCostsPol(db, GAS_SAMPLE_RUNS)),
+        expectedTransfersPerDay(
+          listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= nowIso.slice(0, 10))).map((s) => s.destination),
+          account.address, [config.tokenIn, config.tokenOut]),
+      ),
       allowanceUnits: 0n, // allowance runway isn't a funds problem; fundsAlert ignores it
       nowIso,
       runTime: settings?.runTime ?? "00:00",

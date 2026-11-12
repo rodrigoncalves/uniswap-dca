@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer, TransferStaleError } from "./db.js";
+import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer, TransferStaleError } from "./db.js";
 import { assertPrivateKeyUnchanged, loadPrivateKey, storePrivateKey } from "./setup.js";
 import { parsePrivateKey, splitShares, ValidationError } from "./validation.js";
 
@@ -1263,5 +1263,19 @@ test("a lost compare-and-set throws TransferStaleError; invalid calls throw some
   assert.throws(() => recordTransferReceipt(db, 999, { ...receipt, txHash: "0xaa" }), notStale, "not found");
   recordTransferReceipt(db, id, { ...receipt, txHash: "0xaa" });
   assert.throws(() => recordTransferReceipt(db, id, { ...receipt, txHash: "0xaa" }), stale, "already resolved");
+  db.close();
+});
+
+test("recentTransferGasCostsPol: CONFIRMED only, newest first (date, then id), cumulative attempts", () => {
+  const db = openDb(":memory:");
+  const add = (date: string, dest: string, status: string, gas: string | null) =>
+    db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, gas_cost_pol, created_at) VALUES (?, ?, ?, '1', ?, ?, ?)").run(WALLET, date, dest, status, gas, CONFIRMED_AT);
+  add("2026-11-10", "0xa", "CONFIRMED", "0.002000"); // e.g. a revert (0.0012) then the confirmed retry (0.0008)
+  add("2026-11-12", "0xa", "FAILED", "0.009000");
+  add("2026-11-12", "0xb", "CONFIRMED", "0.000900");
+  add("2026-11-12", "0xc", "CONFIRMED", "0.000700");
+  add("2026-11-11", "0xa", "PENDING", null);
+  assert.deepEqual(recentTransferGasCostsPol(db, 10), ["0.000700", "0.000900", "0.002000"]);
+  assert.deepEqual(recentTransferGasCostsPol(db, 2), ["0.000700", "0.000900"]);
   db.close();
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { balanceHealth, averageGasWei, fundsAlert, RUNWAY_WARNING_DAYS } from "./health.js";
+import { balanceHealth, averageGasWei, projectedDailyGasWei, fundsAlert, RUNWAY_WARNING_DAYS } from "./health.js";
 
 const U = 1_000_000n; // USDT0 has 6 decimals
 const POL = 10n ** 18n;
@@ -62,4 +62,11 @@ test("fundsAlert: warns at or under alertDays, always when the next run can't be
   const gas = fundsAlert(balanceHealth({ ...base, polWei: POL / 4n }), 0);
   assert.deepEqual(gas, [{ resource: "POL", runwayDays: 0, runsOutOn: "2026-09-26T00:00:00.000Z" }], "below min POL: ran out of gas");
   assert.deepEqual(fundsAlert(balanceHealth({ ...base, dailyNeedUnits: 0n, tokenInUnits: 0n, avgGasWei: null }), 30), []);
+});
+
+test("projectedDailyGasWei: swap only / with transfer history / without (conservative)", () => {
+  assert.equal(projectedDailyGasWei(null, 10n, 2), null);
+  assert.equal(projectedDailyGasWei(100n, null, 0), 100n);
+  assert.equal(projectedDailyGasWei(100n, 20n, 2), 140n);
+  assert.equal(projectedDailyGasWei(100n, null, 2), 300n);
 });
