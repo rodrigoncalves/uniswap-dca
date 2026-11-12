@@ -35,7 +35,7 @@ import {
   openDb, getRun, updateRun, isPaused, listRuns, setPaused, updateManualRun, listManualRuns, listAllRuns,
   claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, getStrategy, activeAmounts, completeReachedStrategies, manualBuyUnits,
   getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, listStrategies, type Run, type RunPatch, type Strategy,
-  listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, type Transfer, type TransferFailure,
+  listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, TransferStaleError, type Transfer, type TransferFailure,
 } from "./db.js";
 import { seedSettingsAndStrategyFromEnv, seedPrivateKeyFromEnv, loadSettings, loadPrivateKey, assertPrivateKeyUnchanged, settingsFromEnv, SetupError } from "./setup.js";
 import {
@@ -590,8 +590,9 @@ async function sendTransfer(db: DatabaseSync, config: Config, client: Client, ac
   return { ...t, status: "BROADCAST", nonce, txHash: signed.hash, claimedAt };
 }
 
-/** Logs a BROADCAST-side compare-and-set that lost: another process already resolved this attempt. */
+/** A lost BROADCAST-side compare-and-set (another process resolved this attempt) is logged; any other error rethrows and stops delivery. */
 function resolvedElsewhere(t: Transfer, err: unknown): void {
+  if (!(err instanceof TransferStaleError)) throw err;
   logger.warn("WBTC transfer already resolved elsewhere -- skipped", { id: t.id, txHash: t.txHash, error: err });
 }
 

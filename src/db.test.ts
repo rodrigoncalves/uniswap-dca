@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer } from "./db.js";
+import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer, TransferStaleError } from "./db.js";
 import { assertPrivateKeyUnchanged, loadPrivateKey, storePrivateKey } from "./setup.js";
 import { parsePrivateKey, splitShares, ValidationError } from "./validation.js";
 
@@ -1243,5 +1243,25 @@ test("BROADCAST-side writes are compare-and-set on the tx hash: a stale recovere
   assert.deepEqual({ t: listTransfers(db, { wallet: WALLET })[0], shares: listRunShares(db, WALLET, MIX_DATE) }, before, "row and shares untouched");
   updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED", failure: "nonce_consumed", error: null });
   assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "FAILED");
+  db.close();
+});
+
+test("a lost compare-and-set throws TransferStaleError; invalid calls throw something else", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  const stale = (e: unknown) => e instanceof TransferStaleError;
+  const notStale = (e: unknown) => e instanceof Error && !(e instanceof TransferStaleError);
+  assert.equal(claimTransfer(db, id, CONFIRMED_AT, at(-H)), true);
+  assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: at(H) }, { status: "PENDING" }), stale, "stale claim");
+  updateTransfer(db, id, { status: "SENDING", claimedAt: CONFIRMED_AT }, { status: "BROADCAST", nonce: 7, txHash: "0xaa" });
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xbb" }, { status: "FAILED", failure: "reverted" }), stale, "stale hash");
+  const receipt = { status: "FAILED", failure: "reverted", error: "x", blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" } as const;
+  assert.throws(() => recordTransferReceipt(db, id, { ...receipt, txHash: "0xbb" }), stale, "receipt for a stale hash");
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" } as never, { status: "PENDING" }), notStale, "invalid transition");
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" }, { status: "FAILED" }), notStale, "FAILED without a failure code");
+  assert.throws(() => recordTransferReceipt(db, id, { ...receipt, txHash: "0xaa", failure: null } as never), notStale);
+  assert.throws(() => recordTransferReceipt(db, 999, { ...receipt, txHash: "0xaa" }), notStale, "not found");
+  recordTransferReceipt(db, id, { ...receipt, txHash: "0xaa" });
+  assert.throws(() => recordTransferReceipt(db, id, { ...receipt, txHash: "0xaa" }), stale, "already resolved");
   db.close();
 });

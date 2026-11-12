@@ -928,6 +928,14 @@ export function claimTransfer(db: DatabaseSync, id: number, nowIso: string, stal
   });
 }
 
+/** A compare-and-set lost: the row is no longer in the state (claim / tx hash) the caller holds. Anything else is a real error. */
+export class TransferStaleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransferStaleError";
+  }
+}
+
 const TRANSITIONS = { SENDING: ["BROADCAST", "PENDING", "FAILED"], BROADCAST: ["FAILED"] } as const;
 
 /** FAILED carries a failure code, nothing else does. */
@@ -960,7 +968,7 @@ export function updateTransfer(
   const where = expect.status === "SENDING" ? "id = ? AND status = 'SENDING' AND claimed_at = ?" : "id = ? AND status = 'BROADCAST' AND tx_hash = ?";
   const keys = expect.status === "SENDING" ? [id, expect.claimedAt] : [id, expect.txHash];
   const result = db.prepare(`UPDATE transfers SET ${sets.join(", ")} WHERE ${where}`).run(...entries.map(([, v]) => v), ...keys);
-  if (result.changes !== 1) throw new Error(`transfer #${id} is no longer ${expect.status}${expect.status === "SENDING" ? ` under the claim of ${expect.claimedAt}` : ` as ${expect.txHash}`} -- not updated`);
+  if (result.changes !== 1) throw new TransferStaleError(`transfer #${id} is no longer ${expect.status}${expect.status === "SENDING" ? ` under the claim of ${expect.claimedAt}` : ` as ${expect.txHash}`} -- not updated`);
 }
 
 function addDecimal(current: string | null, delta: string, decimals: number): string {
@@ -981,9 +989,9 @@ export function recordTransferReceipt(
     if (!row) throw new Error(`transfer #${id} not found`);
     const t = rowToTransfer(row);
     assertFailureMatches(id, receipt.status, receipt.failure);
-    if (t.status !== "BROADCAST") throw new Error(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
+    if (t.status !== "BROADCAST") throw new TransferStaleError(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
     // A stale recoverer's receipt must never resolve (or charge gas to) a newer attempt.
-    if (t.txHash !== receipt.txHash) throw new Error(`transfer #${id} is now ${t.txHash}, not ${receipt.txHash} -- receipt not recorded`);
+    if (t.txHash !== receipt.txHash) throw new TransferStaleError(`transfer #${id} is now ${t.txHash}, not ${receipt.txHash} -- receipt not recorded`);
     db.prepare(
       `UPDATE transfers SET status = ?, failure = ?, error = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
     ).run(
