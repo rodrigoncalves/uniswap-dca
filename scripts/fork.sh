@@ -74,6 +74,7 @@ nonce() { cast nonce "$ADDR" --rpc-url "$R"; }
 row() { sqlite3 "$DB" "SELECT $1 FROM runs WHERE wallet='$ADDR'"; }
 mrows() { sqlite3 "$DB" "SELECT $1 FROM manual_runs WHERE wallet='$ADDR' ORDER BY id"; }
 share() { sqlite3 "$DB" "SELECT $1 FROM run_shares WHERE strategy_id=$2"; }
+xfer() { sqlite3 "$DB" "SELECT $1 FROM transfers WHERE wallet='$ADDR' ORDER BY id"; }
 strategies() {
   run control resume >/dev/null
   sqlite3 "$DB" "$1"
@@ -117,6 +118,10 @@ pre_approve() { cast send "$USDT0" "approve(address,uint256)" "$PERMIT2" "$CAP" 
 start_until_mempool() {
   cast rpc evm_setAutomine false --rpc-url "$R" >/dev/null
   run_bg "$@"
+  until_mempool
+}
+# Waits until the bot's BROADCAST row in ${TABLE:-runs} sits in anvil's mempool; sets TX_HASH.
+until_mempool() {
   local hash=""
   for _ in $(seq 1 240); do
     hash=$(sqlite3 "$DB" "SELECT tx_hash FROM ${TABLE:-runs} WHERE wallet='$ADDR' AND status='BROADCAST'" 2>/dev/null || true)
@@ -462,6 +467,9 @@ s_destination() {
   expect "$(nonce)" 2 "nonce (approve + swap, no extra transfer tx)"
 }
 
+# Mixed day (DECISIONS.md #34): the swap lands in the DCA wallet, then one
+# ERC-20 transfer per external destination. 10 + 5 USDT0 (weights 2:1) so the
+# split has a rounding remainder; WBTC must still add up to the satoshi.
 s_destination_mixed() {
   fresh destination_mixed
   init_db
@@ -471,9 +479,121 @@ s_destination_mixed() {
   set_destination 1 "$recip"
   run dca || fail "dca exited non-zero (see $LOG)"
   expect "$(row status)" CONFIRMED "status"
-  expect "$(wbtc "$recip")" 0 "destination got nothing (strategies disagree)"
-  expect "$(wbtc "$ADDR")" "$(row amount_out)" "WBTC stayed in the DCA wallet"
+  expect "$(xfer status)" CONFIRMED "transfer"
   expect "$(logged 'different WBTC destinations')" 1 "warns about the mix"
+  expect "$(wbtc "$recip")" "$(share amount_out 1)" "destination WBTC = strategy 1's share"
+  expect "$(wbtc "$ADDR")" "$(share amount_out 2)" "DCA wallet WBTC = strategy 2's share"
+  expect "$(sqlite3 "$DB" 'SELECT SUM(amount_out) FROM run_shares')" "$(row amount_out)" "shares sum to amount_out (exact)"
+  expect "$(($(wbtc "$recip") + $(wbtc "$ADDR")))" "$(row amount_out)" "on-chain WBTC = amount_out (exact)"
+  expect "$(xfer amount)" "$(wbtc "$recip")" "transfer amount = destination WBTC"
+  expect "$(nonce)" 3 "nonce (approve + swap + transfer)"
+  awk -v a="$(share gas_cost_pol 1)" -v b="$(share gas_cost_pol 2)" 'BEGIN { exit !(a > b) }' ||
+    fail "strategy 1 gas ($(share gas_cost_pol 1)) not above strategy 2's ($(share gas_cost_pol 2)) though it paid the transfer"
+  echo "  ok: strategy 1 paid the transfer gas"
+  awk -v s="$(sqlite3 "$DB" 'SELECT SUM(gas_cost_pol) FROM run_shares')" -v r="$(row gas_cost_pol)" -v x="$(xfer gas_cost_pol)" \
+    'BEGIN { d = s - r - x; exit !(d < 0.000001 && d > -0.000001) }' || fail "share gas != swap gas + transfer gas"
+  echo "  ok: share gas = swap gas + transfer gas"
+}
+
+s_destination_two() {
+  fresh destination_two
+  init_db
+  sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
+  local r1 r2
+  r1=$(new_address)
+  r2=$(new_address)
+  set_destination 1 "$r1"
+  set_destination 2 "$r2"
+  run dca || fail "dca exited non-zero (see $LOG)"
+  expect "$(row status)" CONFIRMED "status"
+  expect "$(xfer status | tr '\n' ' ')" "CONFIRMED CONFIRMED " "two transfers"
+  expect "$(wbtc "$r1")" "$(share amount_out 1)" "destination 1 WBTC = share 1"
+  expect "$(wbtc "$r2")" "$(share amount_out 2)" "destination 2 WBTC = share 2"
+  expect "$(sqlite3 "$DB" 'SELECT SUM(amount_out) FROM run_shares')" "$(row amount_out)" "shares sum to amount_out (exact)"
+  expect "$(($(wbtc "$r1") + $(wbtc "$r2")))" "$(row amount_out)" "destinations hold amount_out (exact)"
+  expect "$(wbtc "$ADDR")" 0 "DCA wallet WBTC"
+  expect "$(nonce)" 4 "nonce (approve + swap + two transfers)"
+}
+
+s_destination_transfer_kill9() {
+  fresh destination_transfer_kill9
+  init_db
+  sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
+  local recip
+  recip=$(new_address)
+  set_destination 1 "$recip"
+  pre_approve
+  start_until_mempool
+  cast rpc evm_mine --rpc-url "$R" >/dev/null # the swap; the bot confirms it, then signs the transfer
+  TABLE=transfers until_mempool
+  expect "$(logged 'sending WBTC transfer')" 1 "transfer sent"
+  kill -9 "$BOT_PID"
+  wait "$BOT_PID" 2>/dev/null || true
+  expect "$(row status)" CONFIRMED "swap confirmed before the kill"
+  expect "$(xfer status)" BROADCAST "transfer after kill -9"
+  cast rpc evm_mine --rpc-url "$R" >/dev/null
+  cast rpc evm_setAutomine true --rpc-url "$R" >/dev/null
+  run dca || fail "recovery run failed (see $LOG)" # run CONFIRMED + open transfer: the cron gate lets it through
+  expect "$(xfer status)" CONFIRMED "transfer after recovery"
+  expect "$(xfer tx_hash)" "$TX_HASH" "same transfer tx, not a new one"
+  expect "$(xfer attempts)" 1 "one attempt"
+  expect "$(wbtc "$recip")" "$(xfer amount)" "destination WBTC = transfer amount"
+  expect "$(nonce)" 3 "nonce (approve + swap + transfer, no re-broadcast)"
+}
+
+retry_transfer() { # as the app's TOTP retry route does (the DCA is not paused here)
+  env "${BOT_ENV[@]}" ID="$1" node --import tsx --input-type=module -e '
+    const { openDb, retryTransfer } = await import("./src/db.ts");
+    const db = openDb(process.env.DB_FILE);
+    try {
+      const r = retryTransfer(db, Number(process.env.ID), false);
+      if (!r.ok) throw new Error(r.reason);
+    } finally {
+      db.close();
+    }'
+}
+
+# Deterministic insufficient_wbtc: pause while the swap sits in the mempool, so
+# the bot confirms it and leaves the transfer PENDING (paused -> transfers
+# wait); drain the WBTC, resume, deliver -> FAILED. Refill, retry -> CONFIRMED.
+s_destination_transfer_retry() {
+  fresh destination_transfer_retry
+  init_db
+  sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
+  local recip sink n
+  recip=$(new_address)
+  sink=$(new_address)
+  set_destination 1 "$recip"
+  pre_approve
+  start_until_mempool
+  run control pause "fork battery"
+  cast rpc evm_mine --rpc-url "$R" >/dev/null
+  cast rpc evm_setAutomine true --rpc-url "$R" >/dev/null
+  wait "$BOT_PID" || fail "swap run exited non-zero (see $LOG)"
+  expect "$(row status)" CONFIRMED "swap confirmed"
+  expect "$(xfer status)" PENDING "transfer waits while paused"
+  expect "$(logged 'WBTC transfers wait')" 1 "logged the wait"
+  cast send "$WBTC" "transfer(address,uint256)" "$sink" "$(wbtc "$ADDR")" --private-key "$KEY" --rpc-url "$R" >/dev/null
+  expect "$(wbtc "$ADDR")" 0 "DCA wallet drained"
+  run control resume >/dev/null
+  n=$(nonce)
+  run dca --transfers && fail "delivery without WBTC should exit non-zero"
+  expect "$(xfer status)" FAILED "transfer"
+  expect "$(xfer failure)" insufficient_wbtc "failure"
+  expect "$(nonce)" "$n" "nonce (nothing sent)"
+  # refill from the sink, impersonated
+  cast rpc anvil_impersonateAccount "$sink" --rpc-url "$R" >/dev/null
+  cast rpc anvil_setBalance "$sink" 0x56BC75E2D63100000 --rpc-url "$R" >/dev/null
+  cast send "$WBTC" "transfer(address,uint256)" "$ADDR" "$(wbtc "$sink")" --unlocked --from "$sink" --rpc-url "$R" >/dev/null
+  cast rpc anvil_stopImpersonatingAccount "$sink" --rpc-url "$R" >/dev/null
+  retry_transfer "$(xfer id)"
+  expect "$(xfer status)" PENDING "retry re-opened the transfer"
+  run dca --transfers || fail "retry delivery failed (see $LOG)"
+  expect "$(xfer status)" CONFIRMED "transfer after retry"
+  expect "$(xfer attempts)" 2 "attempts"
+  expect "$(wbtc "$recip")" "$(share amount_out 1)" "destination WBTC = strategy 1's share"
+  expect "$(wbtc "$ADDR")" "$(share amount_out 2)" "DCA wallet keeps strategy 2's share"
+  expect "$(nonce)" $((n + 1)) "nonce (one transfer)"
 }
 
 s_destination_manual() {
@@ -527,7 +647,7 @@ s_bad_env() {
   expect "$(nonce)" 0 "nothing sent"
 }
 
-ALL=(destination destination_mixed destination_manual destination_bad idempotency parallel kill9 dropped pause revoke approve manual manual_cap manual_kill9 manual_paused report_failure report_off report_errors_only funds_low funds_empty funds_ok app_buy strategies late_strategy strategy_paused end_date max_total key_change wrong_master_key not_due not_configured bad_env)
+ALL=(destination destination_mixed destination_two destination_transfer_kill9 destination_transfer_retry destination_manual destination_bad idempotency parallel kill9 dropped pause revoke approve manual manual_cap manual_kill9 manual_paused report_failure report_off report_errors_only funds_low funds_empty funds_ok app_buy strategies late_strategy strategy_paused end_date max_total key_change wrong_master_key not_due not_configured bad_env)
 for s in "${@:-${ALL[@]}}"; do
   echo "== $s"
   "s_$s"
