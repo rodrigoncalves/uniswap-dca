@@ -15,6 +15,10 @@
 //      BROADCAST with nonce and hash, ONLY THEN broadcast (README.md invariant #4)
 //   5. recovery of our own broadcast: wait for receipt, check the WBTC
 //      Transfer in the receipt, CONFIRMED/FAILED
+//   6. mixed-destination day: the swap paid the DCA wallet, then one WBTC
+//      transfer per destination (deliverTransfers, same BROADCAST-before-send)
+//
+// --transfers: recovery + transfer delivery only, no run-time gate, no purchase.
 //
 // Scheduled runs sum active strategies into one swap and split the result.
 // Coolify's cron ticks every 15 min; a scheduled run exits silently before
@@ -30,7 +34,8 @@ import { loadConfig, loadMasterKey, type Config } from "./config.js";
 import {
   openDb, getRun, updateRun, isPaused, listRuns, setPaused, updateManualRun, listManualRuns, listAllRuns,
   claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, getStrategy, activeAmounts, completeReachedStrategies, manualBuyUnits,
-  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, listStrategies, type Run, type RunPatch,
+  getSettings, getSecret, getReportMode, getAlertDays, recentGasCostsPol, listStrategies, type Run, type RunPatch, type Strategy,
+  listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, type Transfer, type TransferFailure,
 } from "./db.js";
 import { seedSettingsAndStrategyFromEnv, seedPrivateKeyFromEnv, loadSettings, loadPrivateKey, assertPrivateKeyUnchanged, settingsFromEnv, SetupError } from "./setup.js";
 import {
@@ -43,6 +48,7 @@ import {
   getTokenMeta,
   getChainlinkPrice,
   buildApproveTx,
+  buildTransferTx,
   simulate,
   getNonce,
   signTx,
@@ -57,6 +63,7 @@ import {
   assertPermit,
   assertSwapTx,
   assertApprovalTx,
+  assertTransferTx,
   assertOutputTransfer,
   toBaseUnits,
   derivePrimaryType,
@@ -65,6 +72,8 @@ import {
   needsApproval,
   approvalCapFor,
   splitShares,
+  planTransfers,
+  ValidationError,
   assertRunTotal,
   formatUnits,
   AMOUNT_DECIMALS,
@@ -80,6 +89,7 @@ import {
   type ReceiptLog,
   parsePrivateKey,
   resolveRecipient,
+  parseDestination,
 } from "./validation.js";
 import { UNIVERSAL_ROUTERS, CHAINLINK_FEEDS, PERMIT2_ADDRESS } from "./tokens.js";
 import { logger, registerSecret } from "./logger.js";
@@ -91,12 +101,15 @@ type Account = ReturnType<typeof getAccount>;
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const MANUAL = process.argv.includes("--manual");
+const TRANSFERS = process.argv.includes("--transfers");
 // A manual PENDING older than this was interrupted before broadcasting
 // (a live buy reaches BROADCAST in seconds, at most a few minutes with an approve).
 const MANUAL_PENDING_STALE_MS = 60 * 60 * 1000;
 const POL_DECIMALS = 18;
 const APPROVE_RECEIPT_TIMEOUT_MS = 3 * 60 * 1000;
 const NONCE_CONSUMED_RECHECK_MS = 30 * 1000;
+// A SENDING transfer older than this was interrupted before BROADCAST, so nothing was sent.
+const TRANSFER_SENDING_STALE_MS = 60 * 60 * 1000;
 
 function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
@@ -122,6 +135,13 @@ function errorMessage(err: unknown): string {
 /** Each strategy's WBTC destination (null = none), for resolveRecipient. */
 function destinationsOf(db: DatabaseSync, strategyIds: number[]): (string | null)[] {
   return strategyIds.map((id) => getStrategy(db, id)?.destination ?? null);
+}
+
+/** The swap's WBTC split per share, and the transfers a mixed day (swap paid the wallet) owes. */
+function planDay(amountOut: bigint, gasCostPol: string | null, gasCostUsd: string | null, shares: { strategyId: number; amountIn: bigint; destination: string | null }[], swapRecipient: string, wallet: string) {
+  const results = splitShares(amountOut, gasCostPol, gasCostUsd, shares);
+  const transfers = planTransfers(results.map((r, i) => ({ destination: shares[i]!.destination, amountOut: BigInt(r.amountOut) })), swapRecipient, wallet);
+  return { results, transfers };
 }
 
 /** Today's total of strategies that would buy, for the approve cap. */
@@ -187,7 +207,7 @@ async function runVerifiedFlow(config: Config, settings: Settings, client: Clien
   // swap tx itself. One swap has one recipient: strategies that disagree
   // leave the WBTC in the DCA wallet. Re-validated here on every run.
   const { recipient, mixed } = resolveRecipient(destinations, account.address, [config.tokenIn, config.tokenOut]);
-  if (mixed) logger.warn("strategies in this swap have different WBTC destinations -- this purchase stays in the DCA wallet");
+  if (mixed) logger.warn("strategies in this swap have different WBTC destinations -- swap to the DCA wallet, then one transfer per destination");
 
   const quoteResponse: QuoteResponse = await getQuote(config.uniswapApiKey, {
     type: "EXACT_INPUT",
@@ -311,6 +331,7 @@ async function runVerifiedFlow(config: Config, settings: Settings, client: Clien
     minimumAmount,
     simulatedOut,
     recipient,
+    mixed,
     deadline,
     impliedPrice,
     oraclePrice,
@@ -400,12 +421,18 @@ async function finalize(
     ...gasFields,
   };
   if (run.manualId === undefined) {
-    const shares = listRunShares(db, run.wallet, run.date);
-    confirmScheduledRun(
-      db, run.wallet, run.date, confirmation,
-      splitShares(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares.map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn) }))),
-      [] // shortcut: no transfers yet -- a mixed day fails conservation (fail closed) until Task 4 plans them
-    );
+    const shares = listRunShares(db, run.wallet, run.date).map((s) => ({ strategyId: s.strategyId, amountIn: BigInt(s.amountIn), destination: s.destination }));
+    const { results, transfers } = planDay(amountOut, gasFields.gasCostPol, gasFields.gasCostUsd, shares, run.recipient!, run.wallet);
+    try {
+      confirmScheduledRun(db, run.wallet, run.date, confirmation, results, transfers.map((t) => ({ destination: t.destination, amount: t.amount.toString() })));
+    } catch (err) {
+      // Conservation broken: nothing was written, the run stays BROADCAST and every tick fails the same way until someone looks.
+      if (err instanceof ValidationError) {
+        setPaused(db, { paused: true, reason: `auto-paused: ${run.date} WBTC split does not add up -- ${err.message}` });
+        logger.error("WBTC split does not add up -- DCA paused", { date: run.date, txHash: run.txHash, error: err.message });
+      }
+      throw err;
+    }
   } else saver(db, run)(confirmation);
   const completed = completeReachedStrategies(db, todayUtc(), new Date().toISOString(), AMOUNT_DECIMALS);
   if (completed.length > 0) logger.info("strategy limit reached -- completed", { strategies: completed });
@@ -479,13 +506,177 @@ async function recoverPreviousDays(db: DatabaseSync, config: Config, client: Cli
       saver(db, run)({ status: "FAILED", error: "process interrupted before broadcast" });
     }
   }
+  await deliverTransfers(db, config, client, account);
+}
+
+// ============================================================
+// WBTC transfers -- mixed-destination days. Same never-re-broadcast rule as
+// the swap: only the claimer (PENDING -> SENDING) sends, and BROADCAST (nonce +
+// hash, compare-and-set on the claim) is recorded before sendRaw.
+// ============================================================
+
+/** Exactly `amount` of WBTC to `recipient`, nothing anywhere else (no intermediaries). */
+function assertExactTransfer(logs: readonly ReceiptLog[], config: Config, recipient: string, amount: bigint): void {
+  const moved = assertOutputTransfer(logs, { tokenOut: config.tokenOut, recipient, minimumAmount: amount });
+  if (moved !== amount) throw new Error(`moved ${moved} WBTC, expected exactly ${amount}`);
+}
+
+function failTransferBeforeSend(db: DatabaseSync, t: Transfer, claimedAt: string, failure: TransferFailure, error: string): void {
+  updateTransfer(db, t.id, { status: "SENDING", claimedAt }, { status: "FAILED", failure, error });
+  logger.error("WBTC transfer failed, nothing sent", { id: t.id, date: t.date, destination: t.destination, failure, error });
+  process.exitCode = 1;
+}
+
+/** Claims, validates, signs and sends one transfer. Returns its BROADCAST row, or null when nothing was sent. */
+async function sendTransfer(db: DatabaseSync, config: Config, client: Client, account: Account, t: Transfer): Promise<Transfer | null> {
+  const claimedAt = new Date().toISOString();
+  if (!claimTransfer(db, t.id, claimedAt, new Date(Date.now() - TRANSFER_SENDING_STALE_MS).toISOString())) return null; // held by another process
+  const held = { status: "SENDING", claimedAt } as const;
+
+  let dest: `0x${string}` | null;
+  try {
+    dest = parseDestination(t.destination, { dcaWallet: account.address, extraForbidden: [config.tokenIn, config.tokenOut] });
+  } catch (err) {
+    failTransferBeforeSend(db, t, claimedAt, "bad_destination", errorMessage(err));
+    return null;
+  }
+  if (dest === null) {
+    failTransferBeforeSend(db, t, claimedAt, "bad_destination", "destination is empty");
+    return null;
+  }
+
+  const amount = BigInt(t.amount);
+  let nonce: number;
+  let signed: Awaited<ReturnType<typeof signTx>>;
+  try {
+    const balance = await getErc20Balance(client, config.tokenOut, account.address);
+    if (balance < amount) {
+      failTransferBeforeSend(db, t, claimedAt, "insufficient_wbtc", "insufficient WBTC in the DCA wallet");
+      return null;
+    }
+    const tx = buildTransferTx(config.tokenOut, account.address, dest, amount);
+    assertTransferTx(tx, { chainId: 137, fromAddress: account.address, tokenAddress: config.tokenOut, recipient: dest, amount });
+    try {
+      assertExactTransfer((await simulate(client, account.address, [tx])) as ReceiptLog[], config, dest, amount);
+    } catch (err) {
+      throw new Error(`pre-broadcast simulation failed: ${errorMessage(err)}`);
+    }
+    nonce = await getNonce(client, account.address, "pending");
+    signed = await signTx(client, account, { ...tx, nonce });
+    if (signed.gas > MAX_GAS_LIMIT) throw new Error(`estimated gas ${signed.gas} above MAX_GAS_LIMIT`);
+  } catch (err) {
+    // Nothing signed was sent: release the claim, a later tick tries again.
+    updateTransfer(db, t.id, held, { status: "PENDING", error: errorMessage(err) });
+    logger.error("WBTC transfer failed before broadcast -- stays PENDING", { id: t.id, date: t.date, error: err });
+    process.exitCode = 1;
+    return null;
+  }
+
+  // BROADCAST before sending, and only while our claim still holds (compare-and-set).
+  try {
+    updateTransfer(db, t.id, held, { status: "BROADCAST", nonce, txHash: signed.hash });
+  } catch (err) {
+    logger.error("WBTC transfer claim lost -- not sent", { id: t.id, error: err });
+    process.exitCode = 1;
+    return null;
+  }
+  logger.info("sending WBTC transfer", { id: t.id, date: t.date, destination: dest, amount: t.amount, nonce, txHash: signed.hash });
+  try {
+    await sendRaw(client, signed.raw);
+  } catch (err) {
+    // May have reached the mempool anyway -- recovery decides by receipt/nonce, never resending.
+    logger.error("sendRawTransaction failed; recovery decides", { error: err, txHash: signed.hash });
+  }
+  return { ...t, status: "BROADCAST", nonce, txHash: signed.hash, claimedAt };
+}
+
+/** Receipt -> CONFIRMED/FAILED, charging its real gas to the destination's shares. */
+function finalizeTransfer(db: DatabaseSync, config: Config, t: Transfer, receipt: NonNullable<Awaited<ReturnType<typeof getReceipt>>>): void {
+  const gasCostPol = Number(receipt.gasUsed * receipt.effectiveGasPrice) / 10 ** POL_DECIMALS;
+  const run = getRun(db, t.wallet, t.date);
+  const gasFields = {
+    blockNumber: receipt.blockNumber.toString(),
+    gasUsed: receipt.gasUsed.toString(),
+    gasCostPol: gasCostPol.toFixed(6),
+    gasCostUsd: (gasCostPol * Number(run?.oraclePolUsd ?? 0)).toFixed(4),
+  };
+  if (receipt.status !== "success") {
+    recordTransferReceipt(db, t.id, { status: "FAILED", failure: "reverted", error: "transfer reverted on-chain", ...gasFields });
+    logger.error("WBTC transfer reverted on-chain", { id: t.id, date: t.date, txHash: t.txHash });
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    assertExactTransfer(receipt.logs as ReceiptLog[], config, t.destination, BigInt(t.amount));
+  } catch (err) {
+    // Same reasoning as the swap's finalize: WBTC moved unexpectedly, stop until someone looks.
+    const message = `transfer confirmed, but output doesn't match: ${errorMessage(err)}`;
+    recordTransferReceipt(db, t.id, { status: "FAILED", failure: "output_mismatch", error: message, ...gasFields });
+    setPaused(db, { paused: true, reason: `auto-paused: ${t.date} WBTC ${message}` });
+    logger.error("WBTC transfer output doesn't match -- DCA paused", { id: t.id, date: t.date, txHash: t.txHash, error: message });
+    process.exitCode = 1;
+    return;
+  }
+  recordTransferReceipt(db, t.id, { status: "CONFIRMED", failure: null, error: null, ...gasFields });
+  logger.info("WBTC transfer confirmed", { id: t.id, date: t.date, destination: t.destination, amount: t.amount, txHash: t.txHash });
+}
+
+/** Resolves a BROADCAST transfer. False = still unmined with its nonce free: later nonces would queue behind it. */
+async function recoverTransfer(db: DatabaseSync, config: Config, client: Client, account: Account, t: Transfer): Promise<boolean> {
+  if (t.nonce === null || t.txHash === null) throw new Error(`transfer #${t.id} in BROADCAST without nonce/txHash -- inspect by hand`);
+  const hash = t.txHash as `0x${string}`;
+  let rechecked = false;
+  let waited = false;
+  for (;;) {
+    // Nonce BEFORE receipt, as in recoverBroadcast. A transfer has no deadline: never FAILED by time.
+    const latestNonce = await getNonce(client, account.address, "latest");
+    const receipt = await getReceipt(client, hash);
+    const action = decideRecovery({ hasReceipt: receipt !== null, latestNonce, recordedNonce: t.nonce, nowSeconds: 0, deadline: Number.POSITIVE_INFINITY });
+    if (action === "FINALIZE") {
+      finalizeTransfer(db, config, t, receipt!);
+      return true;
+    }
+    if (action === "FAILED_NONCE_CONSUMED") {
+      if (!rechecked) {
+        rechecked = true;
+        await waitReceipt(client, hash, NONCE_CONSUMED_RECHECK_MS);
+        continue;
+      }
+      const error = `nonce ${t.nonce} consumed by another tx; ${hash} never mined`;
+      updateTransfer(db, t.id, { status: "BROADCAST" }, { status: "FAILED", failure: "nonce_consumed", error });
+      logger.error("WBTC transfer not confirmed", { id: t.id, date: t.date, error });
+      process.exitCode = 1;
+      return true;
+    }
+    if (waited) {
+      logger.warn("WBTC transfer still unmined -- left BROADCAST, later transfers wait", { id: t.id, txHash: hash });
+      return false;
+    }
+    waited = true;
+    logger.info("waiting for WBTC transfer receipt", { id: t.id, txHash: hash });
+    await waitReceipt(client, hash, APPROVE_RECEIPT_TIMEOUT_MS);
+  }
+}
+
+/** Every open transfer, oldest first. Stops at one still in flight. Nothing is sent while paused. */
+async function deliverTransfers(db: DatabaseSync, config: Config, client: Client, account: Account): Promise<void> {
+  for (const open of listTransfers(db, { wallet: account.address, open: true })) {
+    // Re-checked per transfer: an output_mismatch earlier in this loop pauses.
+    if (isPaused(db, new Date().toISOString())) {
+      logger.info("DCA paused -- WBTC transfers wait");
+      return;
+    }
+    // SENDING too: claimTransfer returns a stale one to PENDING first; a live one belongs to another process.
+    const t = open.status === "BROADCAST" ? open : await sendTransfer(db, config, client, account, open);
+    if (t && !(await recoverTransfer(db, config, client, account, t))) return;
+  }
 }
 
 // ============================================================
 // execution
 // ============================================================
 
-async function dryRun(config: Config, settings: Settings, db: DatabaseSync, client: Client, account: Account, date: string, amount: string, strategyIds: number[]): Promise<void> {
+async function dryRun(config: Config, settings: Settings, db: DatabaseSync, client: Client, account: Account, date: string, amount: string, strategies: Pick<Strategy, "id" | "amount" | "destination">[]): Promise<void> {
   // Read-only on purpose -- see the comment at the top of the file.
   const existing = getRun(db, account.address, date);
   if (existing) console.log(`(info) a record already exists for today: status=${existing.status}`);
@@ -493,7 +684,7 @@ async function dryRun(config: Config, settings: Settings, db: DatabaseSync, clie
     console.log("(info) DCA is paused -- the real run would exit without buying");
   }
 
-  const r = await runVerifiedFlow(config, settings, client, account, amount, dailyAmountFor(db, date, amount), destinationsOf(db, strategyIds));
+  const r = await runVerifiedFlow(config, settings, client, account, amount, dailyAmountFor(db, date, amount), strategies.map((s) => s.destination));
   console.log(`=== DRY RUN${MANUAL ? " (manual buy)" : ""} -- nothing was broadcast ===`);
   console.log(`run time: ${settings.runTime} UTC`);
   console.log(`amount: ${amount} ${config.tokenInSymbol}`);
@@ -510,6 +701,11 @@ async function dryRun(config: Config, settings: Settings, db: DatabaseSync, clie
       : `approve: not needed (allowance ${r.allowance})`
   );
   console.log(`simulation: WBTC received ${r.simulatedOut} (minimum ${r.minimumAmount})`);
+  if (r.mixed) {
+    // Not simulated: the WBTC isn't in the wallet yet. Weights are full strategy amounts (the claim may take less of a max total).
+    const shares = strategies.map((s) => ({ strategyId: s.id, amountIn: toBaseUnits(s.amount, AMOUNT_DECIMALS), destination: s.destination }));
+    for (const t of planDay(r.simulatedOut, null, null, shares, r.recipient, account.address).transfers) console.log(`then transfer: ${t.amount} WBTC -> ${t.destination}`);
+  }
   console.log("tx that would be sent:", JSON.stringify(r.swapResponse.swap, null, 2));
 }
 
@@ -542,7 +738,8 @@ async function realRun(config: Config, db: DatabaseSync, client: Client, account
       return;
     }
     logger.info("scheduled buy", { date, total: totalHuman, strategies: claim.shares.map((s) => s.strategyId) });
-    await execute(config, db, client, account, totalHuman, totalHuman, { wallet: account.address, date }, claim.shares.map((s) => s.strategyId));
+    await execute(config, db, client, account, totalHuman, totalHuman, { wallet: account.address, date }, claim.shares.map((s) => s.destination));
+    await deliverTransfers(db, config, client, account);
   }
   await emailReport(config, db, account.address, date);
   await emailFundsAlert(config, db, client, account);
@@ -624,7 +821,7 @@ async function manualRun(config: Config, db: DatabaseSync, client: Client, accou
   }
   const { id: manualId, amount } = claim;
   logger.info("manual buy", { id: manualId, strategy: strategyId, amount });
-  await execute(config, db, client, account, amount, dailyAmount, { wallet: account.address, date, manualId }, [strategyId]);
+  await execute(config, db, client, account, amount, dailyAmount, { wallet: account.address, date, manualId }, destinationsOf(db, [strategyId]));
 }
 
 /** The buy itself, shared by the daily and the manual run: the row already exists as PENDING. */
@@ -636,12 +833,12 @@ async function execute(
   amount: string,
   dailyAmount: string,
   key: Pick<Run, "wallet" | "date" | "manualId">,
-  strategyIds: number[]
+  destinations: (string | null)[]
 ): Promise<void> {
   const save = saver(db, key);
   let signed: Awaited<ReturnType<typeof signTx>>;
   try {
-    const r = await runVerifiedFlow(config, loadSettings(db), client, account, amount, dailyAmount, destinationsOf(db, strategyIds));
+    const r = await runVerifiedFlow(config, loadSettings(db), client, account, amount, dailyAmount, destinations);
     save({
       amountIn: r.dcaAmountBaseUnits.toString(),
       recipient: r.recipient,
@@ -706,7 +903,8 @@ async function main(): Promise<void> {
     const settings = DRY_RUN
       ? getSettings(db) ?? settingsFromEnv(process.env) ?? (() => { throw new SetupError("settings not configured -- finish setup in the app"); })()
       : loadSettings(db); // SetupError ("finish setup in the app") -> exit 1, nothing bought
-    if (!MANUAL && !DRY_RUN && !isDue(nowIso, settings.runTime)) return;
+    if (TRANSFERS && (MANUAL || DRY_RUN)) throw new Error("--transfers runs alone: no --manual, no --dry-run");
+    if (!MANUAL && !DRY_RUN && !TRANSFERS && !isDue(nowIso, settings.runTime)) return;
     const masterKey = loadMasterKey();
     if (!DRY_RUN) seedPrivateKeyFromEnv(db, process.env, masterKey);
     // Dry-run never seeds the database. A legacy env key can preview a fresh
@@ -724,14 +922,20 @@ async function main(): Promise<void> {
     const account = getAccount(key);
     const assertCurrentSigner = () => assertPrivateKeyUnchanged(db, masterKey, key);
     const today = todayUtc();
-    if (!MANUAL && !DRY_RUN) {
+    if (!MANUAL && !DRY_RUN && !TRANSFERS) {
       // Every 15-min tick lands here: nothing to do (no network, no log)
-      // before today's run time, or once today's run is final. PENDING or
-      // BROADCAST still go through realRun, whose recovery resolves them.
+      // before today's run time, or once today's run is final with no WBTC
+      // transfer open. PENDING or BROADCAST still go through realRun, whose
+      // recovery resolves them (and delivers open transfers).
       const status = getRun(db, account.address, today)?.status;
-      if (status === "CONFIRMED" || status === "FAILED" || status === "PAUSED") return;
+      if ((status === "CONFIRMED" || status === "FAILED" || status === "PAUSED") && !hasOpenTransfers(db, account.address)) return;
     }
     const client = createRpcClient(config.rpcUrl, config.rpcUrlFallback);
+    if (TRANSFERS) {
+      // Recovery + delivery only: no run-time gate, no purchase.
+      await recoverPreviousDays(db, config, client, account, today);
+      return;
+    }
     if (MANUAL) {
       if (process.argv.includes("--amount")) throw new Error("--amount is gone: a manual buy spends the strategy's own amount (edit it in the app)");
       const strategyId = Number(argValue("--strategy"));
@@ -742,15 +946,15 @@ async function main(): Promise<void> {
         if (!strategy) throw new Error(`strategy #${strategyId} not found`);
         const units = manualBuyUnits(db, strategy, AMOUNT_DECIMALS);
         if (units <= 0n) throw new Error(`strategy #${strategyId} has nothing left of its max total`);
-        await dryRun(config, settings, db, client, account, today, formatUnits(units, AMOUNT_DECIMALS), [strategyId]);
+        await dryRun(config, settings, db, client, account, today, formatUnits(units, AMOUNT_DECIMALS), [strategy]);
       } else await manualRun(config, db, client, account, today, strategyId, assertCurrentSigner);
     } else {
       const amounts = activeAmounts(db, today);
       if (DRY_RUN) {
         // Same filter as activeAmounts: the strategies today's swap would serve.
-        const ids = listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= today)).map((s) => s.id);
+        const active = listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= today));
         if (amounts.length === 0) console.log("(info) no active strategy -- the real run would buy nothing");
-        else await dryRun(config, settings, db, client, account, today, formatUnits(assertRunTotal(amounts), AMOUNT_DECIMALS), ids);
+        else await dryRun(config, settings, db, client, account, today, formatUnits(assertRunTotal(amounts), AMOUNT_DECIMALS), active);
       } else await realRun(config, db, client, account, today, assertCurrentSigner);
     }
   } finally {
