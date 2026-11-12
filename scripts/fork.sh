@@ -487,9 +487,13 @@ s_destination_mixed() {
   expect "$(($(wbtc "$recip") + $(wbtc "$ADDR")))" "$(row amount_out)" "on-chain WBTC = amount_out (exact)"
   expect "$(xfer amount)" "$(wbtc "$recip")" "transfer amount = destination WBTC"
   expect "$(nonce)" 3 "nonce (approve + swap + transfer)"
-  awk -v a="$(share gas_cost_pol 1)" -v b="$(share gas_cost_pol 2)" 'BEGIN { exit !(a > b) }' ||
-    fail "strategy 1 gas ($(share gas_cost_pol 1)) not above strategy 2's ($(share gas_cost_pol 2)) though it paid the transfer"
-  echo "  ok: strategy 1 paid the transfer gas"
+  # Swap gas splits 10:5; the transfer's gas goes to strategy 1 only (6-decimal rounding per side).
+  awk -v s="$(share gas_cost_pol 2)" -v g="$(row gas_cost_pol)" 'BEGIN { d = s - g * 5 / 15; exit !(d < 0.000002 && d > -0.000002) }' ||
+    fail "strategy 2 gas $(share gas_cost_pol 2) != swap gas $(row gas_cost_pol) x 5/15 (no transfer gas)"
+  echo "  ok: strategy 2 (DCA wallet) paid only its swap share"
+  awk -v s="$(share gas_cost_pol 1)" -v g="$(row gas_cost_pol)" -v x="$(xfer gas_cost_pol)" 'BEGIN { d = s - g * 10 / 15 - x; exit !(d < 0.000002 && d > -0.000002) }' ||
+    fail "strategy 1 gas $(share gas_cost_pol 1) != swap gas $(row gas_cost_pol) x 10/15 + transfer gas $(xfer gas_cost_pol)"
+  echo "  ok: strategy 1 paid its swap share + the transfer gas"
   awk -v s="$(sqlite3 "$DB" 'SELECT SUM(gas_cost_pol) FROM run_shares')" -v r="$(row gas_cost_pol)" -v x="$(xfer gas_cost_pol)" \
     'BEGIN { d = s - r - x; exit !(d < 0.000001 && d > -0.000001) }' || fail "share gas != swap gas + transfer gas"
   echo "  ok: share gas = swap gas + transfer gas"
@@ -560,7 +564,7 @@ s_destination_transfer_retry() {
   fresh destination_transfer_retry
   init_db
   sqlite3 "$DB" "INSERT INTO strategies (label, amount, status, created_at) VALUES ('second', '5', 'active', '2026-01-01T00:00:00.000Z')"
-  local recip sink n
+  local recip sink n amount gas
   recip=$(new_address)
   sink=$(new_address)
   set_destination 1 "$recip"
@@ -581,6 +585,8 @@ s_destination_transfer_retry() {
   expect "$(xfer status)" FAILED "transfer"
   expect "$(xfer failure)" insufficient_wbtc "failure"
   expect "$(nonce)" "$n" "nonce (nothing sent)"
+  amount=$(xfer amount)
+  gas=$(xfer gas_cost_pol)
   # refill from the sink, impersonated
   cast rpc anvil_impersonateAccount "$sink" --rpc-url "$R" >/dev/null
   cast rpc anvil_setBalance "$sink" 0x56BC75E2D63100000 --rpc-url "$R" >/dev/null
@@ -591,6 +597,9 @@ s_destination_transfer_retry() {
   run dca --transfers || fail "retry delivery failed (see $LOG)"
   expect "$(xfer status)" CONFIRMED "transfer after retry"
   expect "$(xfer attempts)" 2 "attempts"
+  expect "$(xfer amount)" "$amount" "amount unchanged by the retry"
+  awk -v a="$(xfer gas_cost_pol)" -v b="${gas:-0}" 'BEGIN { exit !(a + 0 > 0 && a + 0 >= b + 0) }' || fail "transfer gas $(xfer gas_cost_pol) not cumulative (before: '$gas')"
+  echo "  ok: transfer gas cumulative ($gas -> $(xfer gas_cost_pol))"
   expect "$(wbtc "$recip")" "$(share amount_out 1)" "destination WBTC = strategy 1's share"
   expect "$(wbtc "$ADDR")" "$(share amount_out 2)" "DCA wallet keeps strategy 2's share"
   expect "$(nonce)" $((n + 1)) "nonce (one transfer)"
