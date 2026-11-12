@@ -1019,7 +1019,12 @@ function confirmedMixedDay(db: DatabaseSync): number {
 
 function broadcast(db: DatabaseSync, id: number, nowIso: string, nonce: number, txHash: string): void {
   assert.equal(claimTransfer(db, id, nowIso, at(-H)), true);
-  updateTransfer(db, id, { status: "BROADCAST", nonce, txHash });
+  updateTransfer(db, id, { status: "SENDING", claimedAt: nowIso }, { status: "BROADCAST", nonce, txHash });
+}
+
+/** Test-only: change the failure code of a row that is already FAILED (no API transition does that). */
+function setFailure(db: DatabaseSync, id: number, failure: string): void {
+  db.prepare("UPDATE transfers SET failure = ? WHERE id = ? AND status = 'FAILED'").run(failure, id);
 }
 
 test("migrate v12: transfers table with its status/failure checks and one row per (wallet, date, destination)", () => {
@@ -1102,7 +1107,7 @@ test("claimTransfer: only one claimer wins; stale SENDING returns to PENDING", (
   assert.equal(claimTransfer(db, id, at(2 * H), at(H)), true, "stale SENDING reclaimed");
   const t = listTransfers(db, { wallet: WALLET })[0]!;
   assert.deepEqual([t.attempts, t.claimedAt], [2, at(2 * H)]);
-  updateTransfer(db, id, { status: "BROADCAST", nonce: 9, txHash: "0xaa" });
+  updateTransfer(db, id, { status: "SENDING", claimedAt: at(2 * H) }, { status: "BROADCAST", nonce: 9, txHash: "0xaa" });
   assert.equal(claimTransfer(db, id, at(5 * H), at(4 * H)), false, "BROADCAST is never reclaimed -- it may be on chain");
   assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "BROADCAST");
   db.close();
@@ -1136,10 +1141,10 @@ test("retryTransfer: refuses while paused, non-FAILED, and output_mismatch / bad
   assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
   recordTransferReceipt(db, id, { status: "FAILED", failure: "reverted", error: "boom", blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
   for (const failure of ["output_mismatch", "bad_destination"] as const) {
-    updateTransfer(db, id, { failure });
+    setFailure(db, id, failure);
     assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: `${failure} is not retryable -- inspect it by hand` });
   }
-  updateTransfer(db, id, { failure: "reverted" });
+  setFailure(db, id, "reverted");
   assert.deepEqual(listTransfers(db, { wallet: WALLET, open: true }), []);
   assert.equal(listTransfers(db, { wallet: WALLET, unconfirmed: true }).length, 1);
   assert.deepEqual(retryTransfer(db, id, true), { ok: false, reason: "DCA is paused -- resume first" });
@@ -1152,12 +1157,74 @@ test("retryTransfer: refuses while paused, non-FAILED, and output_mismatch / bad
     ["PENDING", null, null, null, null, null, "retry after 0xaa: boom", 1, "4000", "30000", "0.000400", "0.0002"]
   );
   assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
-  for (const failure of ["nonce_consumed", "insufficient_wbtc"] as const) {
-    updateTransfer(db, id, { status: "FAILED", failure, error: "e" });
-    assert.deepEqual(retryTransfer(db, id, false), { ok: true });
-    assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after no tx: e");
-  }
+  // insufficient_wbtc: found before broadcasting (SENDING -> FAILED, no tx)
+  assert.equal(claimTransfer(db, id, at(H), at(-H)), true);
+  updateTransfer(db, id, { status: "SENDING", claimedAt: at(H) }, { status: "FAILED", failure: "insufficient_wbtc", error: "e" });
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after no tx: e");
+  // nonce_consumed: BROADCAST -> FAILED, no error text -> no ": null" suffix
+  broadcast(db, id, at(2 * H), 8, "0xcc");
+  updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.error, "retry after 0xcc");
   assert.deepEqual(listTransfers(db, { wallet: "0x0000000000000000000000000000000000000B0b" }), []);
   assert.deepEqual(listTransfers(db, { wallet: WALLET, date: "2026-11-11" }), []);
   db.close();
+});
+
+test("updateTransfer is compare-and-set: a stale claimer can't broadcast after a reclaim; only allowed transitions", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  const A = CONFIRMED_AT;
+  assert.equal(claimTransfer(db, id, A, at(-H)), true); // process A claims, then stalls past the stale window
+  assert.equal(claimTransfer(db, id, at(2 * H), at(H)), true); // B reclaims
+  assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: A }, { status: "BROADCAST", nonce: 8, txHash: "0xaa" }), /no longer SENDING/, "A lost its claim while B still holds SENDING");
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.txHash, null);
+  updateTransfer(db, id, { status: "SENDING", claimedAt: at(2 * H) }, { status: "BROADCAST", nonce: 9, txHash: "0xbb" });
+  assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: A }, { status: "BROADCAST", nonce: 8, txHash: "0xaa" }), /no longer SENDING/);
+  let t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.nonce, t.txHash, t.claimedAt], ["BROADCAST", 9, "0xbb", at(2 * H)], "row as B left it");
+
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" } as never, { status: "PENDING" }), /BROADCAST -> PENDING is not allowed/);
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED" }), /failure code/);
+  assert.throws(() => updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: null }), /failure code/);
+  assert.throws(() => recordTransferReceipt(db, id, { status: "FAILED", failure: null, error: "x", blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
+  assert.throws(() => recordTransferReceipt(db, id, { status: "CONFIRMED", failure: "reverted", error: null, blockNumber: "1", gasUsed: "1", gasCostPol: "0.000001", gasCostUsd: "0.0001" }), /failure code/);
+  t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.gasUsed], ["BROADCAST", null], "rejected calls change nothing");
+
+  // SENDING -> PENDING (error before broadcast) releases the claim; BROADCAST needs nonce + hash
+  updateTransfer(db, id, { status: "BROADCAST" }, { status: "FAILED", failure: "reverted", error: "r" });
+  retryTransfer(db, id, false);
+  assert.equal(claimTransfer(db, id, at(3 * H), at(2 * H)), true);
+  assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: at(3 * H) }, { status: "BROADCAST" }), /nonce and tx hash/);
+  updateTransfer(db, id, { status: "SENDING", claimedAt: at(3 * H) }, { status: "PENDING", error: "rpc down" });
+  t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.claimedAt, t.error], ["PENDING", null, "rpc down"]);
+  assert.throws(() => updateTransfer(db, id, { status: "SENDING", claimedAt: at(3 * H) }, { status: "FAILED", failure: "bad_destination" }), /no longer SENDING/);
+  db.close();
+});
+
+test("confirmScheduledRun stores the checksummed destination, so UNIQUE (wallet, date, destination) holds across casings", () => {
+  const db = openDb(":memory:");
+  const { patch, results } = mixedDay(db);
+  confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, [{ destination: MIX_DEST.toLowerCase(), amount: "4000" }]);
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.destination, MIX_DEST);
+  assert.throws(() => db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, created_at) VALUES (?, ?, ?, '1', 'PENDING', ?)").run(WALLET, MIX_DATE, MIX_DEST, CONFIRMED_AT), /UNIQUE/);
+  db.close();
+});
+
+test("migrate: a DB already at v12 without the transfers table gets it", () => {
+  const path = tempDbPath();
+  try {
+    const first = openDb(path);
+    first.exec("DROP TABLE transfers"); // as left by the first v12 commit (run_shares.destination only)
+    first.close();
+    const again = openDb(path);
+    assert.equal((again.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 12);
+    assert.deepEqual(listTransfers(again, { wallet: WALLET }), []);
+    again.close();
+  } finally {
+    rmSync(join(path, ".."), { recursive: true, force: true });
+  }
 });

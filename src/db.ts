@@ -99,6 +99,20 @@ function migrate(db: DatabaseSync): void {
   // Read the version under the write lock: a second process may have
   // completed the migration while this one waited for BEGIN IMMEDIATE.
   const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
+  // v12: one ERC-20 transfer per external destination on a mixed day (swap paid the DCA wallet).
+  // Ungated, before the early return: DBs already at v12 (run_shares.destination only) get it too.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet TEXT NOT NULL, date TEXT NOT NULL, destination TEXT NOT NULL, amount TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','BROADCAST','CONFIRMED','FAILED')),
+      failure TEXT CHECK (failure IN ('reverted','nonce_consumed','insufficient_wbtc','bad_destination','output_mismatch')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT, nonce INTEGER, tx_hash TEXT, block_number TEXT,
+      gas_used TEXT, gas_cost_pol TEXT, gas_cost_usd TEXT,
+      error TEXT, created_at TEXT NOT NULL,
+      UNIQUE (wallet, date, destination)
+    )`);
   if (version >= SCHEMA_VERSION) {
     db.exec("COMMIT");
     return;
@@ -207,19 +221,6 @@ function migrate(db: DatabaseSync): void {
   if (version < 11 && !(db.prepare("PRAGMA table_info(strategies)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE strategies ADD COLUMN destination TEXT");
   // v12: WBTC destination snapshotted per share at claim. NULL = the DCA wallet.
   if (version < 12 && !(db.prepare("PRAGMA table_info(run_shares)").all() as { name: string }[]).some((c) => c.name === "destination")) db.exec("ALTER TABLE run_shares ADD COLUMN destination TEXT");
-  // v12: one ERC-20 transfer per external destination on a mixed day (swap paid the DCA wallet).
-  if (version < 12) db.exec(`
-    CREATE TABLE IF NOT EXISTS transfers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      wallet TEXT NOT NULL, date TEXT NOT NULL, destination TEXT NOT NULL, amount TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','BROADCAST','CONFIRMED','FAILED')),
-      failure TEXT CHECK (failure IN ('reverted','nonce_consumed','insufficient_wbtc','bad_destination','output_mismatch')),
-      attempts INTEGER NOT NULL DEFAULT 0,
-      claimed_at TEXT, nonce INTEGER, tx_hash TEXT, block_number TEXT,
-      gas_used TEXT, gas_cost_pol TEXT, gas_cost_usd TEXT,
-      error TEXT, created_at TEXT NOT NULL,
-      UNIQUE (wallet, date, destination)
-    )`);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   db.exec("COMMIT");
   } catch (err) {
@@ -824,7 +825,7 @@ export function confirmScheduledRun(
     writeShareResults(db, wallet, date, results);
     updateRun(db, wallet, date, patch);
     const insert = db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, created_at) VALUES (?, ?, ?, ?, 'PENDING', ?)");
-    for (const t of transfers) insert.run(wallet, date, t.destination, t.amount, patch.confirmedAt ?? null);
+    for (const t of transfers) insert.run(wallet, date, getAddress(t.destination), t.amount, patch.confirmedAt ?? null);
     db.exec("COMMIT");
   } catch (err) {
     db.exec("ROLLBACK");
@@ -917,6 +918,7 @@ function inWriteLock<T>(db: DatabaseSync, fn: () => T): T {
  * PENDING -> SENDING for exactly one caller. SENDING claimed before
  * `staleBeforeIso` goes back to PENDING first: nothing was sent, since
  * BROADCAST is recorded before the send. BROADCAST is never reclaimed.
+ * On success claimed_at = `nowIso` exactly: the caller's claim token for updateTransfer.
  */
 export function claimTransfer(db: DatabaseSync, id: number, nowIso: string, staleBeforeIso: string): boolean {
   return inWriteLock(db, () => {
@@ -926,15 +928,38 @@ export function claimTransfer(db: DatabaseSync, id: number, nowIso: string, stal
   });
 }
 
+const TRANSITIONS = { SENDING: ["BROADCAST", "PENDING", "FAILED"], BROADCAST: ["FAILED"] } as const;
+
+/** FAILED carries a failure code, nothing else does. */
+function assertFailureMatches(id: number, status: string, failure: TransferFailure | null | undefined): void {
+  if ((status === "FAILED") !== (failure !== null && failure !== undefined)) {
+    throw new Error(`transfer #${id}: status ${status} with failure ${failure ?? "null"} -- FAILED needs a failure code, nothing else takes one`);
+  }
+}
+
+/**
+ * Compare-and-set: applies only while the row is still in `expect` (for
+ * SENDING, still held by the claim that wrote `claimedAt`), else throws -- a
+ * stale claimer that lost its row to a reclaim can never record BROADCAST and
+ * send. Transitions: SENDING -> BROADCAST | PENDING (nothing sent; releases the
+ * claim) | FAILED, BROADCAST -> FAILED.
+ */
 export function updateTransfer(
   db: DatabaseSync, id: number,
-  patch: { status?: "PENDING" | "BROADCAST" | "FAILED"; failure?: TransferFailure | null; nonce?: number; txHash?: string; error?: string | null }
+  expect: { status: "SENDING"; claimedAt: string } | { status: "BROADCAST" },
+  patch: { status: "PENDING" | "BROADCAST" | "FAILED"; failure?: TransferFailure | null; nonce?: number; txHash?: string; error?: string | null }
 ): void {
+  if (!(TRANSITIONS[expect.status] as readonly string[]).includes(patch.status)) throw new Error(`transfer #${id}: ${expect.status} -> ${patch.status} is not allowed`);
+  assertFailureMatches(id, patch.status, patch.failure);
+  if (patch.status === "BROADCAST" && (patch.nonce === undefined || !patch.txHash)) throw new Error(`transfer #${id}: BROADCAST needs its nonce and tx hash`);
   const snake = { status: "status", failure: "failure", nonce: "nonce", txHash: "tx_hash", error: "error" } as const;
   const entries = Object.entries(patch).filter(([, value]) => value !== undefined) as [keyof typeof snake, string | number | null][];
-  if (entries.length === 0) return;
-  const result = db.prepare(`UPDATE transfers SET ${entries.map(([key]) => `${snake[key]} = ?`).join(", ")} WHERE id = ?`).run(...entries.map(([, v]) => v), id);
-  if (result.changes !== 1) throw new Error(`transfer #${id} not found`);
+  const sets = entries.map(([key]) => `${snake[key]} = ?`);
+  if (patch.status === "PENDING") sets.push("claimed_at = NULL");
+  const where = expect.status === "SENDING" ? "id = ? AND status = 'SENDING' AND claimed_at = ?" : "id = ? AND status = 'BROADCAST'";
+  const keys = expect.status === "SENDING" ? [id, expect.claimedAt] : [id];
+  const result = db.prepare(`UPDATE transfers SET ${sets.join(", ")} WHERE ${where}`).run(...entries.map(([, v]) => v), ...keys);
+  if (result.changes !== 1) throw new Error(`transfer #${id} is no longer ${expect.status}${expect.status === "SENDING" ? ` under the claim of ${expect.claimedAt}` : ""} -- not updated`);
 }
 
 function addDecimal(current: string | null, delta: string, decimals: number): string {
@@ -954,6 +979,7 @@ export function recordTransferReceipt(
     const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) throw new Error(`transfer #${id} not found`);
     const t = rowToTransfer(row);
+    assertFailureMatches(id, receipt.status, receipt.failure);
     if (t.status !== "BROADCAST") throw new Error(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
     db.prepare(
       `UPDATE transfers SET status = ?, failure = ?, error = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
@@ -985,7 +1011,7 @@ export function retryTransfer(db: DatabaseSync, id: number, paused: boolean): { 
     if (!RETRYABLE.includes(t.failure)) return { ok: false, reason: `${t.failure} is not retryable -- inspect it by hand` };
     db.prepare(
       "UPDATE transfers SET status = 'PENDING', failure = NULL, nonce = NULL, tx_hash = NULL, block_number = NULL, claimed_at = NULL, error = ? WHERE id = ?"
-    ).run(`retry after ${t.txHash ?? "no tx"}: ${t.error}`, id);
+    ).run(`retry after ${t.txHash ?? "no tx"}${t.error === null ? "" : `: ${t.error}`}`, id);
     return { ok: true };
   });
 }
