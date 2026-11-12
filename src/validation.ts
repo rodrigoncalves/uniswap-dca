@@ -478,6 +478,72 @@ export function assertApprovalTx(tx: ApprovalTxToValidate, expect: ApprovalTxExp
 }
 
 // ============================================================
+// assertTransferTx
+// ============================================================
+
+const ERC20_TRANSFER_ABI = [
+  {
+    type: "function",
+    name: "transfer",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+export interface TransferTxExpectation {
+  chainId: number;
+  fromAddress: string;
+  /** The TOKEN (WBTC) -- transfer() is called ON it. */
+  tokenAddress: string;
+  recipient: string;
+  /** Exact: a transfer moves precisely the credited amount, no more, no less. */
+  amount: bigint;
+}
+
+export function assertTransferTx(tx: ApprovalTxToValidate, expect: TransferTxExpectation): void {
+  const problems: string[] = [];
+
+  if (tx.chainId !== expect.chainId) {
+    problems.push(`chainId: expected ${expect.chainId}, got ${tx.chainId}`);
+  }
+  if (!addressEquals(tx.from, expect.fromAddress)) {
+    problems.push(`from: expected ${expect.fromAddress}, got ${tx.from}`);
+  }
+  if (!addressEquals(tx.to, expect.tokenAddress)) {
+    problems.push(`to: expected the token address (${expect.tokenAddress}), got ${tx.to} -- transfer() is called ON the token`);
+  }
+  if (!isZeroValue(tx.value)) {
+    problems.push(`value: expected "0", got "${tx.value}"`);
+  }
+
+  let decoded: { functionName: string; args: readonly unknown[] } | undefined;
+  try {
+    decoded = decodeFunctionData({ abi: ERC20_TRANSFER_ABI, data: tx.data as `0x${string}` }) as {
+      functionName: string;
+      args: readonly unknown[];
+    };
+  } catch {
+    problems.push(`data: calldata does not decode as transfer(address,uint256)`);
+  }
+
+  if (decoded) {
+    const [recipient, amount] = decoded.args as [string, bigint];
+    if (!addressEquals(recipient, expect.recipient)) {
+      problems.push(`recipient: expected ${expect.recipient}, got ${recipient}`);
+    }
+    if (amount !== expect.amount) {
+      problems.push(`amount: expected exactly ${expect.amount}, got ${amount}`);
+    }
+  }
+
+  if (problems.length > 0) fail(problems);
+}
+
+// ============================================================
 // toBaseUnits
 // ============================================================
 

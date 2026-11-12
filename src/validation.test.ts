@@ -7,6 +7,7 @@ import {
   assertPermit,
   assertSwapTx,
   assertApprovalTx,
+  assertTransferTx,
   toBaseUnits,
   derivePrimaryType,
   computeImpliedPricePerBtc,
@@ -537,6 +538,65 @@ test("assertApprovalTx: rejects decoded amount above the cap", () => {
 test("assertApprovalTx: rejects calldata that is not approve (wrong selector)", () => {
   const tx = { ...baseApprovalTx(), data: "0xdeadbeef" as `0x${string}` };
   assertRejects(() => assertApprovalTx(tx, baseApprovalExpectation()), "approve");
+});
+
+// ============================================================
+// assertTransferTx -- WBTC transfer(recipient, amount) called ON the token.
+// ============================================================
+
+const TRANSFER_ABI = [
+  {
+    type: "function",
+    name: "transfer",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+// Same calldata buildTransferTx (wallet.ts) produces; inlined to avoid importing the network layer.
+function transferCalldata(to: string, amount: bigint): `0x${string}` {
+  return encodeFunctionData({ abi: TRANSFER_ABI, functionName: "transfer", args: [to as `0x${string}`, amount] });
+}
+
+const TRANSFER_AMOUNT = 12345n;
+
+function baseTransferTx() {
+  return { to: USDT0, from: WALLET, data: transferCalldata(OTHER_ADDR, TRANSFER_AMOUNT), value: "0", chainId: 137 };
+}
+
+function baseTransferExpectation() {
+  return { chainId: 137, fromAddress: WALLET, tokenAddress: USDT0, recipient: OTHER_ADDR, amount: TRANSFER_AMOUNT };
+}
+
+test("assertTransferTx: accepts a valid transfer", () => {
+  assert.doesNotThrow(() => assertTransferTx(baseTransferTx(), baseTransferExpectation()));
+});
+
+test("assertTransferTx: rejects 'to' other than the token", () => {
+  assertRejects(() => assertTransferTx({ ...baseTransferTx(), to: PERMIT2 }, baseTransferExpectation()), "to");
+});
+
+test("assertTransferTx: rejects non-zero value", () => {
+  assertRejects(() => assertTransferTx({ ...baseTransferTx(), value: "1" }, baseTransferExpectation()), "value");
+});
+
+test("assertTransferTx: rejects approve calldata", () => {
+  const tx = { ...baseTransferTx(), data: approveCalldata(OTHER_ADDR, TRANSFER_AMOUNT) };
+  assertRejects(() => assertTransferTx(tx, baseTransferExpectation()), "data");
+});
+
+test("assertTransferTx: rejects another recipient", () => {
+  const tx = { ...baseTransferTx(), data: transferCalldata(PERMIT2, TRANSFER_AMOUNT) };
+  assertRejects(() => assertTransferTx(tx, baseTransferExpectation()), "recipient");
+});
+
+test("assertTransferTx: rejects amount + 1 (exact match required)", () => {
+  const tx = { ...baseTransferTx(), data: transferCalldata(OTHER_ADDR, TRANSFER_AMOUNT + 1n) };
+  assertRejects(() => assertTransferTx(tx, baseTransferExpectation()), "amount");
 });
 
 // ============================================================

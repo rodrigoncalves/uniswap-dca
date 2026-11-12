@@ -25,6 +25,7 @@ const ERC20_ABI = [
   { type: "function", name: "decimals", inputs: [], outputs: [{ type: "uint8" }], stateMutability: "view" },
   { type: "function", name: "symbol", inputs: [], outputs: [{ type: "string" }], stateMutability: "view" },
   { type: "function", name: "approve", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
+  { type: "function", name: "transfer", inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
 ] as const;
 
 const CHAINLINK_ABI = [
@@ -142,6 +143,17 @@ export function buildApproveTx(token: `0x${string}`, from: `0x${string}`, spende
     to: token,
     from,
     data: encodeFunctionData({ abi: ERC20_ABI, functionName: "approve", args: [spender, amount] }),
+    value: "0",
+    chainId: 137,
+  };
+}
+
+/** transfer(to, amount) called ON the token. The caller validates with assertTransferTx before signing. */
+export function buildTransferTx(token: `0x${string}`, from: `0x${string}`, to: `0x${string}`, amount: bigint): CallTx {
+  return {
+    to: token,
+    from,
+    data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [to, amount] }),
     value: "0",
     chainId: 137,
   };
