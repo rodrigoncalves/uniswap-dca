@@ -63,7 +63,9 @@ export function buildReport(run: Run, shares: { label: string; amountIn: string;
       ? `Sent ${btc(t.amount)} BTC to ${t.destination}: https://polygonscan.com/tx/${t.txHash}`
       : t.status === "FAILED"
         ? `NOT sent ${btc(t.amount)} BTC to ${t.destination} (${t.failure}) -- it is in the DCA wallet; retry from the app`
-        : `Sending ${btc(t.amount)} BTC to ${t.destination} (${t.status})`
+        : t.status === "CANCELED"
+          ? `Canceled: ${btc(t.amount)} BTC to ${t.destination} -- it stays in the DCA wallet`
+          : `Sending ${btc(t.amount)} BTC to ${t.destination} (${t.status})`
   );
   const transferText = transferLines.length ? ["", "WBTC transfers:", ...transferLines.map((line) => `  ${line}`)].join("\n") : "";
   const shareRows: [string, string][] = shares.map((share) => [
@@ -113,6 +115,7 @@ export function buildReport(run: Run, shares: { label: string; amountIn: string;
     headline = `<div style="font-size:20px;font-weight:600;color:#111827">Nothing was bought</div>
       <div style="font-size:14px;color:#374151;margin-top:10px;padding:10px 12px;background:#f9fafb;border-radius:8px;font-family:ui-monospace,Menlo,monospace;word-break:break-word">${escapeHtml(run.error ?? "(no error recorded)")}</div>`;
   }
+  if (transfers.some((t) => t.status === "FAILED")) subject += " -- WBTC transfer FAILED";
 
   const row = ([k, v]: [string, string]) =>
     `<tr><td style="padding:8px 0;color:#6b7280;font-size:14px">${k}</td><td style="padding:8px 0;color:#111827;font-size:14px;text-align:right;font-weight:500">${v}</td></tr>`;

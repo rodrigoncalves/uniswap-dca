@@ -2,7 +2,7 @@
 // on-chain reality before anything risks money.
 import { loadConfig, loadMasterKey } from "./config.js";
 import { PERMIT2_ADDRESS, CHAINLINK_FEEDS } from "./tokens.js";
-import { MAX_ORACLE_AGE_SECONDS, resolveRecipient } from "./validation.js";
+import { MAX_ORACLE_AGE_SECONDS, resolveRecipient, expectedTransfersPerDay } from "./validation.js";
 import {
   createRpcClient,
   getAccount,
@@ -99,9 +99,8 @@ async function main(): Promise<void> {
   for (const st of strategies) {
     console.log(`strategy #${st.id}${st.label ? ` (${st.label})` : ""} [${st.status}]: ${st.destination ?? "DCA wallet"}`);
   }
-  const transferCount = new Set(active.map((st) => st.destination).filter((d) => d !== null)).size;
   console.log(mixed
-    ? `today's scheduled swap: mixed destinations -- delivers to the DCA wallet, then ${transferCount} transfer(s)`
+    ? `today's scheduled swap: mixed destinations -- delivers to the DCA wallet, then ${expectedTransfersPerDay(active.map((st) => st.destination), account.address, [config.tokenIn, config.tokenOut])} transfer(s)`
     : `today's scheduled swap delivers to: ${recipient}${recipient === account.address ? " (DCA wallet)" : " (inside the swap tx)"}`);
   for (const t of listTransfers(db, { wallet: account.address, unconfirmed: true })) {
     console.log(`#${t.id} ${t.date} ${t.destination} ${(Number(t.amount) / 10 ** tokenOutMeta.decimals).toFixed(tokenOutMeta.decimals)} ${t.status} ${t.failure ?? ""} ${t.error ?? ""}`.trimEnd());

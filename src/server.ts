@@ -19,7 +19,7 @@ import { loadAppConfig, loadMasterKey, loadConfig } from "./config.js";
 import { createRpcClient, getNativeBalance, getErc20Balance, getErc20Allowance } from "./wallet.js";
 import { PERMIT2_ADDRESS } from "./tokens.js";
 import { balanceHealth, averageGasWei, projectedDailyGasWei, GAS_SAMPLE_RUNS } from "./health.js";
-import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, retryTransfer, isPaused, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
+import { openDb, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, listAllRuns, getControl, setPaused, getSecret, putSecret, claimTotpStep, listStrategies, getStrategy, createStrategy, updateStrategy, deleteStrategy, listStrategyHistory, activeAmounts, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, retryTransfer, cancelTransfer, isPaused, REPORT_MODES, type ReportMode, completeReachedStrategies, strategyUnits, manualBuyUnits, type Run } from "./db.js";
 import { encryptSecret, decryptSecret } from "./crypto.js";
 import { base32Encode, base32Decode, matchTotp, otpauthUri } from "./totp.js";
 import { Elevations, TotpLockout, ELEVATION_TTL_MS } from "./elevation.js";
@@ -110,7 +110,10 @@ async function balanceResponse() {
   try {
     const active = listStrategies(db).filter((s) => s.status === "active" && (s.endDate === null || s.endDate >= today));
     transfersPerDay = expectedTransfersPerDay(active.map((s) => s.destination), address, rpc ? [rpc.tokenIn, rpc.tokenOut] : []);
-  } catch { /* corrupt stored destination: the run fails closed on it and `npm run check` reports it */ }
+  } catch (err) {
+    // Corrupt stored destination: the run fails closed on it and `npm run check` reports it.
+    logger.warn("transfer gas left out of the POL runway: a stored WBTC destination is invalid", { error: err });
+  }
   const avgGasWei = projectedDailyGasWei(averageGasWei(recentGasCostsPol(db, GAS_SAMPLE_RUNS)), averageGasWei(recentTransferGasCostsPol(db, GAS_SAMPLE_RUNS)), transfersPerDay);
   const settings = getSettings(db);
   const minPolWei = BigInt(Math.round((settings?.minPolBalance ?? 0) * 1e18)); // same conversion as dca.ts
@@ -813,6 +816,22 @@ const server = createServer((req, res) => {
       logger.warn("WBTC transfer retry from the app", { id });
       startChild(["--transfers"], { kind: "transfers" });
       sendJson(res, 202, { ok: true });
+    });
+    return;
+  }
+
+  // Cancel a PENDING or FAILED WBTC transfer: never sent, the WBTC stays in the DCA wallet.
+  const cancelRoute = /^\/api\/transfers\/([1-9]\d{0,14})\/cancel$/.exec(url.pathname);
+  if (cancelRoute && req.method === "POST") {
+    const id = Number(cancelRoute[1]);
+    postJson(req, res, (body) => {
+      if (!requireElevation(req, res, body)) return;
+      const wallet = walletAddress();
+      if (!wallet || !listTransfers(db, { wallet }).some((t) => t.id === id)) return sendJson(res, 404, { error: `transfer #${id} not found` });
+      const result = cancelTransfer(db, id);
+      if (!result.ok) return sendJson(res, 409, { error: result.reason });
+      logger.warn("WBTC transfer canceled from the app", { id });
+      sendJson(res, 200, { ok: true });
     });
     return;
   }

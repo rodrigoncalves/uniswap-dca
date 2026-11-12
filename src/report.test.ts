@@ -126,7 +126,7 @@ function transfer(overrides: Partial<Transfer>): Transfer {
   return {
     id: 1, wallet: "0x000000000000000000000000000000000000000A", date: "2026-09-24", destination: DEST, amount: "107",
     status: "CONFIRMED", failure: null, attempts: 1, claimedAt: null, nonce: 2, txHash: "0x" + "cd".repeat(32), blockNumber: "2",
-    gasUsed: "50000", gasCostPol: "0.01", gasCostUsd: "0.0010", error: null, createdAt: "2026-09-24T00:00:12.000Z",
+    gasUsed: "50000", gasCostPol: "0.01", gasCostUsd: "0.0010", error: null, prevTxHash: null, createdAt: "2026-09-24T00:00:12.000Z",
     ...overrides,
   };
 }
@@ -147,4 +147,12 @@ test("shouldSendReport: errors mode also sends when a transfer FAILED", () => {
   assert.equal(shouldSendReport("errors", run({ status: "FAILED" }), []), true);
   assert.equal(shouldSendReport("all", ok, []), true);
   assert.equal(shouldSendReport("off", ok, failedTransfer), false);
+});
+
+test("buildReport: a FAILED transfer shows in the subject, whatever the run status", () => {
+  const failed = [transfer({}), transfer({ id: 2, destination: DEST2, status: "FAILED", failure: "reverted" })];
+  for (const status of ["CONFIRMED", "FAILED", "PAUSED"] as const) {
+    assert.match(buildReport(run({ status }), [], [run({})], failed).subject, / -- WBTC transfer FAILED$/, status);
+    assert.doesNotMatch(buildReport(run({ status }), [], [run({})], [transfer({})]).subject, /WBTC transfer FAILED/, status);
+  }
 });

@@ -278,7 +278,7 @@
       renderRows(data.runs);
     }
 
-    // Mixed WBTC destinations: transfers not yet CONFIRMED, with a TOTP retry for the retryable failures.
+    // Mixed WBTC destinations: transfers not yet CONFIRMED, with a TOTP retry for the retryable failures and a TOTP cancel for pending/failed ones.
     const RETRYABLE = ["reverted", "nonce_consumed", "insufficient_wbtc"];
     const IN_FLIGHT = ["PENDING", "SENDING", "BROADCAST"];
     let transfers = [];
@@ -304,6 +304,12 @@
           btn.addEventListener("click", () => retryTransfer(t, btn));
           row.append(btn);
         }
+        if (t.status === "PENDING" || t.status === "FAILED") {
+          const btn = document.createElement("button");
+          btn.textContent = "Cancel";
+          btn.addEventListener("click", () => cancelTransfer(t, btn));
+          row.append(btn);
+        }
         return row;
       }));
     }
@@ -314,6 +320,14 @@
       const res = await withTotp((totp) => api(`/api/transfers/${t.id}/retry`, totp ? { totp } : {}));
       if (!res.ok) { btn.disabled = false; return strategyError(res); }
       watchTransfer(t.id);
+    }
+
+    async function cancelTransfer(t, btn) {
+      if (!confirm(`Cancel sending ${(Number(t.amount) / 1e8).toFixed(8)} BTC to ${t.destination}? It will never be sent: the WBTC stays in the DCA wallet.`)) return;
+      btn.disabled = true;
+      const res = await withTotp((totp) => api(`/api/transfers/${t.id}/cancel`, totp ? { totp } : {}));
+      if (!res.ok) { btn.disabled = false; return strategyError(res); }
+      load();
     }
 
     async function watchTransfer(id) {

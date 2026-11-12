@@ -230,9 +230,27 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
     const wallet = parsePrivateKey(replacementKey).address;
     const revertedId = Number(insertTransfer.run(wallet, yesterday, destination, "reverted", new Date().toISOString()).lastInsertRowid);
     const mismatchId = Number(insertTransfer.run(wallet, yesterday, `0x${"cD".repeat(20)}`, "output_mismatch", new Date().toISOString()).lastInsertRowid);
+    // Cancel (before the retry below: its forked dca.ts --transfers could claim a PENDING row)
+    const insertOpen = transferDb.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, nonce, tx_hash, created_at) VALUES (?, ?, ?, '5', ?, ?, ?, ?)");
+    const pendingId = Number(insertOpen.run(wallet, yesterday, `0x${"eF".repeat(20)}`, "PENDING", null, null, new Date().toISOString()).lastInsertRowid);
+    const broadcastId = Number(insertOpen.run(wallet, yesterday, `0x${"aB".repeat(20)}`, "BROADCAST", 3, `0x${"12".repeat(32)}`, new Date().toISOString()).lastInsertRowid);
     transferDb.close();
     type HistoryState = { transfers: { id: number; status: string }[] };
-    assert.deepEqual(((await (await request("/api/history")).json()) as HistoryState).transfers.map((t) => t.id), [revertedId, mismatchId], "state lists unconfirmed transfers");
+    response = await request(`/api/transfers/${pendingId}/cancel`, "POST", {});
+    assert.equal(response.status, 403, "cancel needs TOTP");
+    assert.equal((await response.json() as { totpRequired: boolean }).totpRequired, true);
+    assert.equal((await request("/api/transfers/999/cancel", "POST", {}, { Cookie: cookie })).status, 404);
+    assert.equal((await request("/api/transfers/1e1/cancel", "POST", {}, { Cookie: cookie })).status, 404, "id parsed strictly");
+    response = await request(`/api/transfers/${broadcastId}/cancel`, "POST", {}, { Cookie: cookie });
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /in flight/);
+    response = await request(`/api/transfers/${pendingId}/cancel`, "POST", {}, { Cookie: cookie });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.deepEqual(((await (await request("/api/history")).json()) as HistoryState).transfers.map((t) => t.id), [revertedId, mismatchId, broadcastId], "state lists unconfirmed transfers, not canceled ones");
+    const cleanupDb = openDb(dbFile);
+    cleanupDb.prepare("DELETE FROM transfers WHERE id = ?").run(broadcastId); // a BROADCAST row would make the retry child below wait on a fake tx
+    cleanupDb.close();
     response = await request(`/api/transfers/${revertedId}/retry`, "POST", {});
     assert.equal(response.status, 403, "retry needs TOTP");
     assert.equal((await response.json() as { totpRequired: boolean }).totpRequired, true);
