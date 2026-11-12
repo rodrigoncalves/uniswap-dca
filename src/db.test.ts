@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fork } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer, TransferStaleError } from "./db.js";
+import { openDb, claimDay, getRun, updateRun, listRuns, isPaused, setPaused, getControl, insertManualRun, updateManualRun, listManualRuns, listAllRuns, getSecret, putSecret, deleteSecret, claimTotpStep, resetTotpStep, createStrategy, getStrategy, listStrategies, updateStrategy, claimScheduledRun, claimManualRun, confirmScheduledRun, listRunShares, strategyUnits, completeReachedStrategies, activeAmounts, setShareResults, listStrategyHistory, deleteStrategy, createSession, sessionExpiresAt, deleteSession, deleteAllSessions, SESSION_TTL_MS, recentGasCostsPol, recentTransferGasCostsPol, getSettings, saveSettings, countInFlight, getReportMode, setReportMode, getAlertDays, setAlertDays, setStrategyDestination, listTransfers, hasOpenTransfers, claimTransfer, updateTransfer, recordTransferReceipt, retryTransfer, cancelTransfer, TransferStaleError } from "./db.js";
 import { assertPrivateKeyUnchanged, loadPrivateKey, storePrivateKey } from "./setup.js";
 import { parsePrivateKey, splitShares, ValidationError } from "./validation.js";
 
@@ -1055,7 +1055,7 @@ test("confirmScheduledRun writes PENDING transfers atomically; rolled back with 
   const [t] = listTransfers(db, { wallet: WALLET, date: MIX_DATE });
   assert.deepEqual(
     { ...t, id: undefined },
-    { id: undefined, wallet: WALLET, date: MIX_DATE, destination: MIX_DEST, amount: "4000", status: "PENDING", failure: null, attempts: 0, claimedAt: null, nonce: null, txHash: null, blockNumber: null, gasUsed: null, gasCostPol: null, gasCostUsd: null, error: null, createdAt: CONFIRMED_AT }
+    { id: undefined, wallet: WALLET, date: MIX_DATE, destination: MIX_DEST, amount: "4000", status: "PENDING", failure: null, attempts: 0, claimedAt: null, nonce: null, txHash: null, prevTxHash: null, blockNumber: null, gasUsed: null, gasCostPol: null, gasCostUsd: null, error: null, createdAt: CONFIRMED_AT }
   );
   assert.equal(hasOpenTransfers(db, WALLET), true);
   assert.throws(() => confirmScheduledRun(db, WALLET, MIX_DATE, patch, results, transfers), /BROADCAST/, "no second confirm");
@@ -1278,4 +1278,105 @@ test("recentTransferGasCostsPol: CONFIRMED only, newest first (date, then id), c
   assert.deepEqual(recentTransferGasCostsPol(db, 10), ["0.000700", "0.000900", "0.002000"]);
   assert.deepEqual(recentTransferGasCostsPol(db, 2), ["0.000700", "0.000900"]);
   db.close();
+});
+
+test("countInFlight: an open transfer (PENDING/SENDING/BROADCAST) counts; FAILED and CANCELED do not", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  assert.equal(countInFlight(db), 1, "PENDING");
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  assert.equal(countInFlight(db), 1, "BROADCAST");
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  assert.equal(countInFlight(db), 0, "FAILED");
+  assert.deepEqual(cancelTransfer(db, id), { ok: true });
+  assert.equal(countInFlight(db), 0, "CANCELED");
+  db.close();
+});
+
+test("retryTransfer keeps the previous tx hash; recordTransferReceipt adopts its receipt only under the current claim, once", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  assert.deepEqual(retryTransfer(db, id, false), { ok: true });
+  let t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.txHash, t.prevTxHash], ["PENDING", null, "0xaa"]);
+  const receipt = { txHash: "0xaa", status: "CONFIRMED", failure: null, error: null, blockNumber: "3", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" } as const;
+  assert.throws(() => recordTransferReceipt(db, id, receipt, at(H)), TransferStaleError, "not claimed");
+  assert.equal(claimTransfer(db, id, at(H), at(-H)), true);
+  assert.throws(() => recordTransferReceipt(db, id, receipt, at(2 * H)), TransferStaleError, "another claim");
+  assert.throws(() => recordTransferReceipt(db, id, { ...receipt, txHash: "0xbb" }, at(H)), TransferStaleError, "not the previous tx");
+  assert.throws(() => recordTransferReceipt(db, id, { ...receipt, status: "FAILED", failure: "reverted", error: "x" }, at(H)), /only a confirmed/);
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.status, "SENDING", "refusals change nothing");
+  recordTransferReceipt(db, id, receipt, at(H));
+  t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.failure, t.txHash, t.blockNumber, t.gasUsed, t.gasCostPol, t.gasCostUsd], ["CONFIRMED", null, "0xaa", "3", "30000", "0.000400", "0.0002"]);
+  assert.deepEqual(listRunShares(db, WALLET, MIX_DATE).map((s) => s.gasCostPol), ["0.001100", "0.003300", "0.000500"], "+0.0004 split 1:3; wallet share untouched");
+  assert.equal(hasOpenTransfers(db, WALLET), false);
+  assert.throws(() => recordTransferReceipt(db, id, receipt, at(H)), TransferStaleError, "never charged twice");
+  db.close();
+});
+
+test("retryTransfer: a failure without a tx keeps the older previous tx hash", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  broadcast(db, id, CONFIRMED_AT, 7, "0xaa");
+  updateTransfer(db, id, { status: "BROADCAST", txHash: "0xaa" }, { status: "FAILED", failure: "nonce_consumed", error: null });
+  retryTransfer(db, id, false);
+  assert.equal(claimTransfer(db, id, at(H), at(-H)), true);
+  updateTransfer(db, id, { status: "SENDING", claimedAt: at(H) }, { status: "FAILED", failure: "insufficient_wbtc", error: "e" });
+  retryTransfer(db, id, false);
+  assert.equal(listTransfers(db, { wallet: WALLET })[0]!.prevTxHash, "0xaa");
+  db.close();
+});
+
+test("cancelTransfer: PENDING or FAILED -> CANCELED (neither open nor unconfirmed); refuses in flight and final", () => {
+  const db = openDb(":memory:");
+  const id = confirmedMixedDay(db);
+  assert.deepEqual(cancelTransfer(db, 999), { ok: false, reason: "transfer #999 not found" });
+  assert.equal(claimTransfer(db, id, CONFIRMED_AT, at(-H)), true);
+  assert.deepEqual(cancelTransfer(db, id), { ok: false, reason: "transfer is in flight -- wait for it to resolve" }, "SENDING");
+  updateTransfer(db, id, { status: "SENDING", claimedAt: CONFIRMED_AT }, { status: "PENDING", error: "rpc down" });
+  assert.deepEqual(cancelTransfer(db, id), { ok: true });
+  const t = listTransfers(db, { wallet: WALLET })[0]!;
+  assert.deepEqual([t.status, t.failure, t.error, t.amount], ["CANCELED", null, "canceled from the app: rpc down", "4000"]);
+  assert.equal(hasOpenTransfers(db, WALLET), false);
+  assert.deepEqual(listTransfers(db, { wallet: WALLET, open: true }), []);
+  assert.deepEqual(listTransfers(db, { wallet: WALLET, unconfirmed: true }), []);
+  assert.deepEqual(cancelTransfer(db, id), { ok: false, reason: "only a pending or failed transfer can be canceled" });
+  assert.equal(claimTransfer(db, id, at(H), at(-H)), false, "a canceled transfer is never sent");
+  assert.deepEqual(retryTransfer(db, id, false), { ok: false, reason: "only a failed transfer can be retried" });
+  db.close();
+
+  const db2 = openDb(":memory:");
+  const id2 = confirmedMixedDay(db2);
+  broadcast(db2, id2, CONFIRMED_AT, 7, "0xaa");
+  assert.deepEqual(cancelTransfer(db2, id2), { ok: false, reason: "transfer is in flight -- wait for it to resolve" }, "BROADCAST");
+  recordTransferReceipt(db2, id2, { txHash: "0xaa", status: "FAILED", failure: "reverted", error: "boom", blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  assert.deepEqual(cancelTransfer(db2, id2), { ok: true });
+  const t2 = listTransfers(db2, { wallet: WALLET })[0]!;
+  assert.deepEqual([t2.status, t2.failure, t2.error, t2.gasCostPol], ["CANCELED", null, "canceled from the app: boom", "0.000400"]);
+  db2.close();
+
+  const db3 = openDb(":memory:");
+  const id3 = confirmedMixedDay(db3);
+  broadcast(db3, id3, CONFIRMED_AT, 7, "0xaa");
+  recordTransferReceipt(db3, id3, { txHash: "0xaa", status: "CONFIRMED", failure: null, error: null, blockNumber: "5", gasUsed: "30000", gasCostPol: "0.000400", gasCostUsd: "0.0002" });
+  assert.deepEqual(cancelTransfer(db3, id3), { ok: false, reason: "only a pending or failed transfer can be canceled" });
+  db3.close();
+});
+
+test("migrate: a v12 transfers table without prev_tx_hash gains it (idempotent)", () => {
+  const path = tempDbPath();
+  try {
+    const first = openDb(path);
+    first.exec("ALTER TABLE transfers DROP COLUMN prev_tx_hash"); // as left by an earlier v12 dev build
+    first.close();
+    const again = openDb(path);
+    assert.ok((again.prepare("PRAGMA table_info(transfers)").all() as { name: string }[]).some((c) => c.name === "prev_tx_hash"));
+    again.close();
+    openDb(path).close(); // a second open doesn't add it twice
+  } finally {
+    rmSync(join(path, ".."), { recursive: true, force: true });
+  }
 });

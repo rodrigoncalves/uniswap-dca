@@ -134,7 +134,9 @@ function assertInFlightBelongsToWallet(db: DatabaseSync, wallet: string): void {
     .prepare(
       `SELECT wallet FROM runs WHERE status IN ('PENDING', 'BROADCAST')
        UNION ALL
-       SELECT wallet FROM manual_runs WHERE status IN ('PENDING', 'BROADCAST')`
+       SELECT wallet FROM manual_runs WHERE status IN ('PENDING', 'BROADCAST')
+       UNION ALL
+       SELECT wallet FROM transfers WHERE status IN ('PENDING', 'SENDING', 'BROADCAST')`
     )
     .all() as { wallet: string }[];
   if (rows.some((row) => row.wallet.toLowerCase() !== wallet.toLowerCase())) {

@@ -105,14 +105,18 @@ function migrate(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS transfers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       wallet TEXT NOT NULL, date TEXT NOT NULL, destination TEXT NOT NULL, amount TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','BROADCAST','CONFIRMED','FAILED')),
+      status TEXT NOT NULL CHECK (status IN ('PENDING','SENDING','BROADCAST','CONFIRMED','FAILED','CANCELED')),
       failure TEXT CHECK (failure IN ('reverted','nonce_consumed','insufficient_wbtc','bad_destination','output_mismatch')),
       attempts INTEGER NOT NULL DEFAULT 0,
-      claimed_at TEXT, nonce INTEGER, tx_hash TEXT, block_number TEXT,
+      claimed_at TEXT, nonce INTEGER, tx_hash TEXT, prev_tx_hash TEXT, block_number TEXT,
       gas_used TEXT, gas_cost_pol TEXT, gas_cost_usd TEXT,
       error TEXT, created_at TEXT NOT NULL,
       UNIQUE (wallet, date, destination)
     )`);
+  // Dev DBs created before prev_tx_hash existed (v12 unreleased).
+  if (!(db.prepare("PRAGMA table_info(transfers)").all() as { name: string }[]).some((c) => c.name === "prev_tx_hash")) {
+    db.exec("ALTER TABLE transfers ADD COLUMN prev_tx_hash TEXT");
+  }
   if (version >= SCHEMA_VERSION) {
     db.exec("COMMIT");
     return;
@@ -450,12 +454,13 @@ export function resetTotpStep(db: DatabaseSync): void {
   db.prepare("UPDATE auth_state SET totp_last_step = NULL WHERE id = 1").run();
 }
 
-/** Purchases not yet final -- recovery still owns them (README.md invariant #4). */
+/** Purchases and WBTC transfers not yet final -- recovery still owns them (README.md invariant #4). */
 export function countInFlight(db: DatabaseSync): number {
   const row = db
     .prepare(
       `SELECT (SELECT COUNT(*) FROM runs WHERE status IN ('PENDING', 'BROADCAST'))
-            + (SELECT COUNT(*) FROM manual_runs WHERE status IN ('PENDING', 'BROADCAST')) AS n`
+            + (SELECT COUNT(*) FROM manual_runs WHERE status IN ('PENDING', 'BROADCAST'))
+            + (SELECT COUNT(*) FROM transfers WHERE status IN ('PENDING', 'SENDING', 'BROADCAST')) AS n`
     )
     .get() as { n: number };
   return Number(row.n);
@@ -845,7 +850,7 @@ export function confirmScheduledRun(
 // claimer (PENDING -> SENDING) sends, and BROADCAST is recorded before the send.
 // ============================================================
 
-export type TransferStatus = "PENDING" | "SENDING" | "BROADCAST" | "CONFIRMED" | "FAILED";
+export type TransferStatus = "PENDING" | "SENDING" | "BROADCAST" | "CONFIRMED" | "FAILED" | "CANCELED";
 export type TransferFailure = "reverted" | "nonce_consumed" | "insufficient_wbtc" | "bad_destination" | "output_mismatch";
 const RETRYABLE: readonly (TransferFailure | null)[] = ["reverted", "nonce_consumed", "insufficient_wbtc"];
 
@@ -861,6 +866,7 @@ export interface Transfer {
   claimedAt: string | null;
   nonce: number | null;
   txHash: string | null;
+  prevTxHash: string | null; // the last attempt's tx, kept by retryTransfer: it may still have mined
   blockNumber: string | null;
   gasUsed: string | null; // gas columns: cumulative over attempts
   gasCostPol: string | null;
@@ -882,6 +888,7 @@ function rowToTransfer(row: Record<string, unknown>): Transfer {
     claimedAt: (row.claimed_at as string | null) ?? null,
     nonce: row.nonce === null || row.nonce === undefined ? null : Number(row.nonce),
     txHash: (row.tx_hash as string | null) ?? null,
+    prevTxHash: (row.prev_tx_hash as string | null) ?? null,
     blockNumber: (row.block_number as string | null) ?? null,
     gasUsed: (row.gas_used as string | null) ?? null,
     gasCostPol: (row.gas_cost_pol as string | null) ?? null,
@@ -891,7 +898,7 @@ function rowToTransfer(row: Record<string, unknown>): Transfer {
   };
 }
 
-/** `open` = PENDING | SENDING | BROADCAST; `unconfirmed` = anything but CONFIRMED. Ordered by id. */
+/** `open` = PENDING | SENDING | BROADCAST; `unconfirmed` = anything but CONFIRMED or CANCELED. Ordered by id. */
 export function listTransfers(db: DatabaseSync, opts: { wallet: string; date?: string; open?: boolean; unconfirmed?: boolean }): Transfer[] {
   const conditions = ["wallet = ?"];
   const params: string[] = [opts.wallet];
@@ -900,7 +907,7 @@ export function listTransfers(db: DatabaseSync, opts: { wallet: string; date?: s
     params.push(opts.date);
   }
   if (opts.open) conditions.push("status IN ('PENDING', 'SENDING', 'BROADCAST')");
-  if (opts.unconfirmed) conditions.push("status <> 'CONFIRMED'");
+  if (opts.unconfirmed) conditions.push("status NOT IN ('CONFIRMED', 'CANCELED')");
   return (db.prepare(`SELECT * FROM transfers WHERE ${conditions.join(" AND ")} ORDER BY id`).all(...params) as Record<string, unknown>[]).map(rowToTransfer);
 }
 
@@ -985,23 +992,34 @@ function addDecimal(current: string | null, delta: string, decimals: number): st
  * A mined transfer (success or revert), once: BROADCAST -> CONFIRMED/FAILED.
  * Its gas is added to the transfer (cumulative over retries) and to the run's
  * shares with that destination, split by amountIn. Wallet-kept shares never pay.
+ *
+ * With `adoptClaimedAt`: the previous attempt (prev_tx_hash) mined after all
+ * (a false nonce_consumed, then Retry) -- SENDING under that claim -> CONFIRMED
+ * with that tx, so the claimer never sends a second one.
  */
 export function recordTransferReceipt(
   db: DatabaseSync, id: number,
-  receipt: { txHash: string; status: "CONFIRMED" | "FAILED"; failure: TransferFailure | null; error: string | null; blockNumber: string; gasUsed: string; gasCostPol: string; gasCostUsd: string }
+  receipt: { txHash: string; status: "CONFIRMED" | "FAILED"; failure: TransferFailure | null; error: string | null; blockNumber: string; gasUsed: string; gasCostPol: string; gasCostUsd: string },
+  adoptClaimedAt?: string
 ): void {
   inWriteLock(db, () => {
     const row = db.prepare("SELECT * FROM transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) throw new Error(`transfer #${id} not found`);
     const t = rowToTransfer(row);
     assertFailureMatches(id, receipt.status, receipt.failure);
-    if (t.status !== "BROADCAST") throw new TransferStaleError(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
-    // A stale recoverer's receipt must never resolve (or charge gas to) a newer attempt.
-    if (t.txHash !== receipt.txHash) throw new TransferStaleError(`transfer #${id} is now ${t.txHash}, not ${receipt.txHash} -- receipt not recorded`);
+    if (adoptClaimedAt !== undefined) {
+      if (receipt.status !== "CONFIRMED") throw new Error(`transfer #${id}: only a confirmed previous tx is adopted`);
+      if (t.status !== "SENDING" || t.claimedAt !== adoptClaimedAt) throw new TransferStaleError(`transfer #${id} is no longer SENDING under the claim of ${adoptClaimedAt} -- receipt not adopted`);
+      if (t.prevTxHash !== receipt.txHash) throw new TransferStaleError(`transfer #${id}'s previous tx is ${t.prevTxHash}, not ${receipt.txHash} -- receipt not adopted`);
+    } else {
+      if (t.status !== "BROADCAST") throw new TransferStaleError(`transfer #${id} is ${t.status}, not BROADCAST -- receipt not recorded`);
+      // A stale recoverer's receipt must never resolve (or charge gas to) a newer attempt.
+      if (t.txHash !== receipt.txHash) throw new TransferStaleError(`transfer #${id} is now ${t.txHash}, not ${receipt.txHash} -- receipt not recorded`);
+    }
     db.prepare(
-      `UPDATE transfers SET status = ?, failure = ?, error = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
+      `UPDATE transfers SET status = ?, failure = ?, error = ?, tx_hash = ?, block_number = ?, gas_used = ?, gas_cost_pol = ?, gas_cost_usd = ? WHERE id = ?`
     ).run(
-      receipt.status, receipt.failure, receipt.error, receipt.blockNumber,
+      receipt.status, receipt.failure, receipt.error, receipt.txHash, receipt.blockNumber,
       (BigInt(t.gasUsed ?? "0") + BigInt(receipt.gasUsed)).toString(),
       addDecimal(t.gasCostPol, receipt.gasCostPol, GAS_POL_DECIMALS),
       addDecimal(t.gasCostUsd, receipt.gasCostUsd, GAS_USD_DECIMALS),
@@ -1018,7 +1036,7 @@ export function recordTransferReceipt(
   });
 }
 
-/** FAILED with a retryable failure -> PENDING, same amount; gas and attempts kept, the last tx noted in `error`. */
+/** FAILED with a retryable failure -> PENDING, same amount; gas and attempts kept, the last tx noted in `error` and kept in prev_tx_hash. */
 export function retryTransfer(db: DatabaseSync, id: number, paused: boolean): { ok: true } | { ok: false; reason: string } {
   return inWriteLock(db, () => {
     if (paused) return { ok: false, reason: "DCA is paused -- resume first" };
@@ -1027,8 +1045,20 @@ export function retryTransfer(db: DatabaseSync, id: number, paused: boolean): { 
     const t = rowToTransfer(row);
     if (!RETRYABLE.includes(t.failure)) return { ok: false, reason: `${t.failure} is not retryable -- inspect it by hand` };
     db.prepare(
-      "UPDATE transfers SET status = 'PENDING', failure = NULL, nonce = NULL, tx_hash = NULL, block_number = NULL, claimed_at = NULL, error = ? WHERE id = ?"
+      "UPDATE transfers SET status = 'PENDING', failure = NULL, nonce = NULL, prev_tx_hash = COALESCE(tx_hash, prev_tx_hash), tx_hash = NULL, block_number = NULL, claimed_at = NULL, error = ? WHERE id = ?"
     ).run(`retry after ${t.txHash ?? "no tx"}${t.error === null ? "" : `: ${t.error}`}`, id);
+    return { ok: true };
+  });
+}
+
+/** PENDING or FAILED -> CANCELED (final): never sent, the WBTC stays in the DCA wallet. In flight or final: refused. */
+export function cancelTransfer(db: DatabaseSync, id: number): { ok: true } | { ok: false; reason: string } {
+  return inWriteLock(db, () => {
+    const row = db.prepare("SELECT status, error FROM transfers WHERE id = ?").get(id) as { status: TransferStatus; error: string | null } | undefined;
+    if (!row) return { ok: false, reason: `transfer #${id} not found` };
+    if (row.status === "SENDING" || row.status === "BROADCAST") return { ok: false, reason: "transfer is in flight -- wait for it to resolve" };
+    if (row.status !== "PENDING" && row.status !== "FAILED") return { ok: false, reason: "only a pending or failed transfer can be canceled" };
+    db.prepare("UPDATE transfers SET status = 'CANCELED', failure = NULL, error = ? WHERE id = ?").run(`canceled from the app${row.error === null ? "" : `: ${row.error}`}`, id);
     return { ok: true };
   });
 }

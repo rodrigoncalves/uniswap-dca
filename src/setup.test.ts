@@ -249,3 +249,36 @@ test("setupIssues: lists what's missing, empty when ready", () => {
   assert.deepEqual(setupIssues(db), []);
   db.close();
 });
+
+function openTransfer(db: ReturnType<typeof openDb>, wallet: string, status: string): void {
+  db.prepare("INSERT INTO transfers (wallet, date, destination, amount, status, created_at) VALUES (?, '2026-09-24', ?, '1', ?, ?)").run(wallet, `0x${"Ab".repeat(20)}`, status, NOW);
+}
+
+test("key replacement refuses while a WBTC transfer is open, like an in-flight run", () => {
+  for (const status of ["PENDING", "SENDING", "BROADCAST"]) {
+    const db = openDb(":memory:");
+    storePrivateKey(db, MK, KEY1 as `0x${string}`);
+    openTransfer(db, parsePrivateKey(KEY1).address, status);
+    assert.throws(() => assertNoPurchaseInFlight(db), /in progress/, status);
+    assert.throws(() => storePrivateKey(db, MK, KEY2 as `0x${string}`), /in progress/, status);
+    assert.equal(loadPrivateKey(db, MK), KEY1);
+    db.close();
+  }
+  const db = openDb(":memory:");
+  openTransfer(db, parsePrivateKey(KEY1).address, "FAILED");
+  assert.doesNotThrow(() => assertNoPurchaseInFlight(db), "a FAILED transfer is not in flight");
+  db.close();
+});
+
+test("seedFromEnv: initial key refuses an open transfer of a different wallet, accepts its own", () => {
+  const other = openDb(":memory:");
+  openTransfer(other, "0x000000000000000000000000000000000000000A", "BROADCAST");
+  assert.throws(() => seedFromEnv(other, { PRIVATE_KEY: KEY1 }, NOW, MK), /different wallet/);
+  assert.equal(getSecret(other, "private_key"), undefined);
+  other.close();
+  const own = openDb(":memory:");
+  openTransfer(own, parsePrivateKey(KEY1).address, "PENDING");
+  seedFromEnv(own, { PRIVATE_KEY: KEY1 }, NOW, MK);
+  assert.equal(loadPrivateKey(own, MK), KEY1);
+  own.close();
+});
