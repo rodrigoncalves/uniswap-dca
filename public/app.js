@@ -482,7 +482,9 @@ function openStrategyDialog(s) {
   const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10); // UTC
   // an unchanged past end date must not block editing other fields; the server refuses any new date before tomorrow
   end.min = end.value && end.value < tomorrow ? end.value : tomorrow;
-  document.getElementById("sf-max").value = s?.maxTotal ?? "";
+  const max = document.getElementById("sf-max");
+  max.value = s?.maxTotal ?? "";
+  max.setCustomValidity(""); // a verdict from the previous dialog
   document.getElementById("sf-dest").value = s?.destination ?? "";
   checkDestination();
   const room = Number(maxRunTotal) - Number(dailyTotal) + (s?.status === "active" ? Number(s.amount) : 0);
@@ -535,6 +537,20 @@ function checkDestination() {
 destInput.addEventListener("input", () => {
   clearTimeout(destTimer);
   destTimer = setTimeout(checkDestination, 250);
+});
+
+// The max total only moves forward: at or below what the strategy already
+// invested it would complete the strategy on the spot. Like the end date, an
+// unchanged value stays valid, so a strategy left below its own total (a cap
+// lowered before this rule) can still have its other fields edited.
+const maxInput = document.getElementById("sf-max");
+maxInput.addEventListener("input", () => {
+  const value = maxInput.value.trim();
+  const invested = editing?.tiles?.totalInvestedUsdt ?? 0;
+  const unchanged = editing !== null && value === (editing.maxTotal ?? "");
+  maxInput.setCustomValidity(value === "" || unchanged || Number(value) > invested
+    ? ""
+    : `This strategy already invested ${fmt(invested)} USDT0 -- a new max total must be above that, or empty for no cap.`);
 });
 
 // click anywhere on the date field opens the calendar, not just the small icon

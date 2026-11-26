@@ -549,6 +549,29 @@ test("claimScheduledRun: max total -- the share is what's left of the budget, th
   db.close();
 });
 
+test("updateStrategy: a new max total must stay above what was already invested", () => {
+  const db = openDb(":memory:");
+  const id = createStrategy(db, { label: null, amount: "10", endDate: null, maxTotal: "100", createdAt: T0 });
+  const bought = insertManualRun(db, WALLET, TODAY, T0, id);
+  updateManualRun(db, bought, { status: "CONFIRMED", amountIn: "60000000" });
+  assert.throws(() => updateStrategy(db, id, { maxTotal: "50" }, T0, TODAY, 6), /not above the 60\.000000 already invested/);
+  assert.throws(() => updateStrategy(db, id, { maxTotal: "60" }, T0, TODAY, 6), /not above/, "equal to the invested completes it at once");
+  assert.equal(getStrategy(db, id)!.maxTotal, "100", "a refused cap changes nothing");
+  updateStrategy(db, id, { maxTotal: "60.5" }, T0, TODAY, 6);
+  assert.equal(getStrategy(db, id)!.maxTotal, "60.5", "a cap above the invested is accepted");
+  updateStrategy(db, id, { maxTotal: null }, T0, TODAY, 6);
+  assert.equal(getStrategy(db, id)!.maxTotal, null, "clearing the cap is always allowed");
+
+  // a strategy already below its own total (a cap lowered before this rule) keeps its other fields editable
+  const legacy = createStrategy(db, { label: null, amount: "10", endDate: null, maxTotal: "50", createdAt: T0 });
+  const old = insertManualRun(db, WALLET, TODAY, T0, legacy);
+  updateManualRun(db, old, { status: "CONFIRMED", amountIn: "60000000" });
+  updateStrategy(db, legacy, { label: "Kept", maxTotal: "50" }, T0, TODAY, 6);
+  assert.equal(getStrategy(db, legacy)!.label, "Kept", "an unchanged cap is not a new cap");
+  assert.equal(getStrategy(db, legacy)!.maxTotal, "50");
+  db.close();
+});
+
 test("strategyUnits: preserves totals above Number.MAX_SAFE_INTEGER", () => {
   const db = openDb(":memory:");
   const id = createStrategy(db, { label: null, amount: "1", endDate: null, maxTotal: "9007199254.740995", createdAt: T0 });
