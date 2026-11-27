@@ -92,9 +92,10 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
 
     response = await request("/api/strategies");
     assert.equal(response.status, 200);
-    const listing = await response.json() as { dailyTotal: string; strategies: { id: number; status: string }[] };
+    const listing = await response.json() as { dailyTotal: string; strategies: { id: number; status: string; tiles: { totalInvestedUnits: string } }[] };
     assert.equal(listing.dailyTotal, "910.000000");
     assert.equal(listing.strategies.find((s) => s.id === 2)?.status, "completed");
+    assert.equal(listing.strategies.find((s) => s.id === 3)?.tiles.totalInvestedUnits, "60000000");
 
     assert.equal((await request("/api/strategies/2", "PATCH", { endDate: null })).status, 409);
     assert.equal((await request("/api/strategies/2", "PATCH", undefined, { "Content-Type": "application/json" })).status, 400);

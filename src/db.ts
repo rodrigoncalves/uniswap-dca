@@ -672,28 +672,36 @@ export function updateStrategy(
   todayUtc: string,
   decimals: number
 ): void {
-  const current = getStrategy(db, id);
-  if (!current) throw new Error(`strategy #${id} not found`);
-  const next: Strategy = { ...current, ...patch };
-  const invested = strategyUnits(db, id, "invested");
-  const maxTotalUnits = next.maxTotal === null ? null : toBaseUnits(next.maxTotal, decimals);
-  const limit = limitReached({ endDate: next.endDate, maxTotalUnits }, invested, todayUtc);
-  if (patch.status === "active" && limit !== null) throw new Error(`strategy #${id}: limit reached (${limit}) -- raise the max total or move the end date first`);
-  const currentMaxTotalUnits = current.maxTotal === null ? null : toBaseUnits(current.maxTotal, decimals);
-  if (maxTotalUnits !== null && maxTotalUnits !== currentMaxTotalUnits && maxTotalUnits <= invested) {
-    throw new Error(`strategy #${id}: max total ${next.maxTotal} is not above the ${formatUnits(invested, decimals)} already invested -- raise it or clear it`);
+  // The scheduler can confirm a purchase from another connection.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const current = getStrategy(db, id);
+    if (!current) throw new Error(`strategy #${id} not found`);
+    const next: Strategy = { ...current, ...patch };
+    const invested = strategyUnits(db, id, "invested");
+    const maxTotalUnits = next.maxTotal === null ? null : toBaseUnits(next.maxTotal, decimals);
+    const limit = limitReached({ endDate: next.endDate, maxTotalUnits }, invested, todayUtc);
+    if (patch.status === "active" && limit !== null) throw new Error(`strategy #${id}: limit reached (${limit}) -- raise the max total or move the end date first`);
+    const currentMaxTotalUnits = current.maxTotal === null ? null : toBaseUnits(current.maxTotal, decimals);
+    if (maxTotalUnits !== null && maxTotalUnits !== currentMaxTotalUnits && maxTotalUnits <= invested) {
+      throw new Error(`strategy #${id}: max total ${next.maxTotal} is not above the ${formatUnits(invested, decimals)} already invested -- raise it or clear it`);
+    }
+    if (current.status === "completed" && patch.status === undefined && (patch.endDate !== undefined || patch.maxTotal !== undefined)) next.status = limit === null ? "active" : "completed";
+    const ended = next.status === "completed";
+    db.prepare("UPDATE strategies SET label = ?, amount = ?, end_date = ?, max_total = ?, status = ?, stopped_at = ? WHERE id = ?").run(
+      next.label,
+      next.amount,
+      next.endDate,
+      next.maxTotal,
+      next.status,
+      ended ? (current.stoppedAt ?? nowIso) : null,
+      id
+    );
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
   }
-  if (current.status === "completed" && patch.status === undefined && (patch.endDate !== undefined || patch.maxTotal !== undefined)) next.status = limit === null ? "active" : "completed";
-  const ended = next.status === "completed";
-  db.prepare("UPDATE strategies SET label = ?, amount = ?, end_date = ?, max_total = ?, status = ?, stopped_at = ? WHERE id = ?").run(
-    next.label,
-    next.amount,
-    next.endDate,
-    next.maxTotal,
-    next.status,
-    ended ? (current.stoppedAt ?? nowIso) : null,
-    id
-  );
 }
 
 /** Only a completed strategy with nothing in flight. Removes its shares and manual rows; never a runs row (the tx record recovery reads). */

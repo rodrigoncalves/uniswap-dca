@@ -539,18 +539,25 @@ destInput.addEventListener("input", () => {
   destTimer = setTimeout(checkDestination, 250);
 });
 
-// The max total only moves forward: at or below what the strategy already
-// invested it would complete the strategy on the spot. Like the end date, an
-// unchanged value stays valid, so a strategy left below its own total (a cap
-// lowered before this rule) can still have its other fields edited.
+function maxTotalToUnits(value) {
+  if (!/^\d+(\.\d{1,6})?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole + fraction.padEnd(6, "0"));
+}
+
 const maxInput = document.getElementById("sf-max");
 maxInput.addEventListener("input", () => {
   const value = maxInput.value.trim();
-  const invested = editing?.tiles?.totalInvestedUsdt ?? 0;
-  const unchanged = editing !== null && value === (editing.maxTotal ?? "");
-  maxInput.setCustomValidity(value === "" || unchanged || Number(value) > invested
-    ? ""
-    : `This strategy already invested ${fmt(invested)} USDT0 -- a new max total must be above that, or empty for no cap.`);
+  const units = maxTotalToUnits(value);
+  const invested = BigInt(editing?.tiles?.totalInvestedUnits ?? "0");
+  const unchanged = units === maxTotalToUnits(editing?.maxTotal ?? "");
+  let error = "";
+  if (value !== "" && units === null) {
+    error = "Enter a decimal with up to 6 fractional digits.";
+  } else if (units !== null && !unchanged && units <= invested) {
+    error = `This strategy already invested ${fmt(editing?.tiles?.totalInvestedUsdt ?? 0, 6)} USDT0 -- a new max total must be above that, or empty for no cap.`;
+  }
+  maxInput.setCustomValidity(error);
 });
 
 // click anywhere on the date field opens the calendar, not just the small icon
@@ -585,7 +592,7 @@ document.getElementById("strategy-form").addEventListener("submit", async (event
   const saved = await res.json();
   if (destChanged) {
     // separate TOTP-gated route (F17); the window opened above usually covers it
-    editing = saved;
+    editing = { ...saved, tiles: editing?.tiles };
     const destRes = await withTotp((totp) => api(`/api/strategies/${saved.id}/destination`, totp ? { destination, totp } : { destination }));
     if (!destRes.ok) {
       msg.textContent = `Saved, but the destination was not: ${(await destRes.json().catch(() => ({}))).error ?? `error ${destRes.status}`}`;

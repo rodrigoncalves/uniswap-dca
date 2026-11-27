@@ -566,9 +566,9 @@ test("updateStrategy: a new max total must stay above what was already invested"
   const legacy = createStrategy(db, { label: null, amount: "10", endDate: null, maxTotal: "50", createdAt: T0 });
   const old = insertManualRun(db, WALLET, TODAY, T0, legacy);
   updateManualRun(db, old, { status: "CONFIRMED", amountIn: "60000000" });
-  updateStrategy(db, legacy, { label: "Kept", maxTotal: "50" }, T0, TODAY, 6);
+  updateStrategy(db, legacy, { label: "Kept", maxTotal: "50.0" }, T0, TODAY, 6);
   assert.equal(getStrategy(db, legacy)!.label, "Kept", "an unchanged cap is not a new cap");
-  assert.equal(getStrategy(db, legacy)!.maxTotal, "50");
+  assert.equal(getStrategy(db, legacy)!.maxTotal, "50.0");
   db.close();
 });
 
