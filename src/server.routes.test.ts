@@ -14,9 +14,17 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
   const dir = mkdtempSync(join(tmpdir(), "dca-route-test-"));
   const dbFile = join(dir, "test.db");
   const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const password = "test-password-only";
+  const initialKey = `0x${"1".repeat(64)}`;
+  const replacementKey = `0x${"2".repeat(64)}`;
+  const createdAt = new Date().toISOString();
   const db = openDb(dbFile);
-  createStrategy(db, { id: 1, label: null, amount: "900", endDate: null, createdAt: new Date().toISOString() });
-  createStrategy(db, { id: 2, label: null, amount: "200", endDate: yesterday, createdAt: new Date().toISOString() });
+  createStrategy(db, { id: 1, label: null, amount: "900", endDate: null, createdAt });
+  createStrategy(db, { id: 2, label: null, amount: "200", endDate: yesterday, createdAt });
+  // strategy 3 already invested 60 of its 100 max total: the cap rule below
+  createStrategy(db, { id: 3, label: null, amount: "10", endDate: null, maxTotal: "100", createdAt });
+  const buy = insertManualRun(db, parsePrivateKey(initialKey).address, createdAt.slice(0, 10), createdAt, 3);
+  updateManualRun(db, buy, { status: "CONFIRMED", amountIn: "60000000" });
   db.close();
 
   const port = await new Promise<number>((resolve) => {
@@ -26,9 +34,6 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
       socket.close(() => resolve(value));
     });
   });
-  const password = "test-password-only";
-  const initialKey = `0x${"1".repeat(64)}`;
-  const replacementKey = `0x${"2".repeat(64)}`;
   let session = "";
   const app = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
     cwd: process.cwd(),
@@ -87,9 +92,10 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
 
     response = await request("/api/strategies");
     assert.equal(response.status, 200);
-    const listing = await response.json() as { dailyTotal: string; strategies: { id: number; status: string }[] };
-    assert.equal(listing.dailyTotal, "900.000000");
+    const listing = await response.json() as { dailyTotal: string; strategies: { id: number; status: string; tiles: { totalInvestedUnits: string } }[] };
+    assert.equal(listing.dailyTotal, "910.000000");
     assert.equal(listing.strategies.find((s) => s.id === 2)?.status, "completed");
+    assert.equal(listing.strategies.find((s) => s.id === 3)?.tiles.totalInvestedUnits, "60000000");
 
     assert.equal((await request("/api/strategies/2", "PATCH", { endDate: null })).status, 409);
     assert.equal((await request("/api/strategies/2", "PATCH", undefined, { "Content-Type": "application/json" })).status, 400);
@@ -212,6 +218,14 @@ test("routes enforce login sessions, CSRF, TOTP and the cap when a completed str
     response = await request("/api/strategies/2", "PATCH", { endDate: null }, { Cookie: cookie });
     assert.equal(response.status, 409);
     assert.match((await response.json() as { error: string }).error, /per-run cap/);
+
+    // a new max total must stay above what the strategy already invested
+    response = await request("/api/strategies/3", "PATCH", { maxTotal: "60" }, { Cookie: cookie });
+    assert.equal(response.status, 409);
+    assert.match((await response.json() as { error: string }).error, /not above the 60\.000000 already invested/);
+    response = await request("/api/strategies/3", "PATCH", { maxTotal: "60.5" }, { Cookie: cookie });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { maxTotal: string }).maxTotal, "60.5");
     response = await request("/api/strategies/2", "PATCH", { status: "paused" });
     assert.equal(response.status, 200);
     assert.equal((await response.json() as { status: string }).status, "paused");

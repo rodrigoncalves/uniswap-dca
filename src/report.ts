@@ -13,15 +13,16 @@ const DECIMALS_OUT = 8; // WBTC
 const SEND_TIMEOUT_MS = 10_000;
 
 /** Sums in base units, divides once -- no float drift across many purchases. */
-function total(values: (string | null)[], decimals: number): number {
-  return Number(values.reduce((sum, v) => sum + BigInt(v ?? "0"), 0n)) / 10 ** decimals;
+function totalUnits(values: (string | null)[]): bigint {
+  return values.reduce((sum, v) => sum + BigInt(v ?? "0"), 0n);
 }
 
 /** `runs` newest first (listAllRuns order). */
 export function summarize(runs: Run[]) {
   const confirmed = runs.filter((r) => r.status === "CONFIRMED");
-  const totalInvestedUsdt = total(confirmed.map((r) => r.amountIn), DECIMALS_IN);
-  const totalBtc = total(confirmed.map((r) => r.amountOut), DECIMALS_OUT);
+  const totalInvestedUnits = totalUnits(confirmed.map((r) => r.amountIn));
+  const totalInvestedUsdt = Number(totalInvestedUnits) / 10 ** DECIMALS_IN;
+  const totalBtc = Number(totalUnits(confirmed.map((r) => r.amountOut))) / 10 ** DECIMALS_OUT;
   const latest = confirmed[0];
   const latestMarketPrice =
     latest?.oracleBtcUsd && latest?.oracleUsdtUsd ? Number(latest.oracleBtcUsd) / Number(latest.oracleUsdtUsd) : null;
@@ -29,6 +30,7 @@ export function summarize(runs: Run[]) {
   const pnlUsdt = latestMarketPrice !== null && totalInvestedUsdt > 0 ? totalBtc * latestMarketPrice - totalInvestedUsdt : null;
   return {
     totalInvestedUsdt,
+    totalInvestedUnits: totalInvestedUnits.toString(),
     totalBtc,
     weightedAvgPrice: totalBtc > 0 ? totalInvestedUsdt / totalBtc : null,
     latestMarketPrice,

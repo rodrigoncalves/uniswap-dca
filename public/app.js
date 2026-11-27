@@ -482,7 +482,9 @@ function openStrategyDialog(s) {
   const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10); // UTC
   // an unchanged past end date must not block editing other fields; the server refuses any new date before tomorrow
   end.min = end.value && end.value < tomorrow ? end.value : tomorrow;
-  document.getElementById("sf-max").value = s?.maxTotal ?? "";
+  const max = document.getElementById("sf-max");
+  max.value = s?.maxTotal ?? "";
+  max.setCustomValidity(""); // a verdict from the previous dialog
   document.getElementById("sf-dest").value = s?.destination ?? "";
   checkDestination();
   const room = Number(maxRunTotal) - Number(dailyTotal) + (s?.status === "active" ? Number(s.amount) : 0);
@@ -537,6 +539,27 @@ destInput.addEventListener("input", () => {
   destTimer = setTimeout(checkDestination, 250);
 });
 
+function maxTotalToUnits(value) {
+  if (!/^\d+(\.\d{1,6})?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole + fraction.padEnd(6, "0"));
+}
+
+const maxInput = document.getElementById("sf-max");
+maxInput.addEventListener("input", () => {
+  const value = maxInput.value.trim();
+  const units = maxTotalToUnits(value);
+  const invested = BigInt(editing?.tiles?.totalInvestedUnits ?? "0");
+  const unchanged = units === maxTotalToUnits(editing?.maxTotal ?? "");
+  let error = "";
+  if (value !== "" && units === null) {
+    error = "Enter a decimal with up to 6 fractional digits.";
+  } else if (units !== null && !unchanged && units <= invested) {
+    error = `This strategy already invested ${fmt(editing?.tiles?.totalInvestedUsdt ?? 0, 6)} USDT0 -- a new max total must be above that, or empty for no cap.`;
+  }
+  maxInput.setCustomValidity(error);
+});
+
 // click anywhere on the date field opens the calendar, not just the small icon
 document.getElementById("sf-end").addEventListener("click", (event) => {
   try { event.target.showPicker(); } catch { /* older browsers: the icon still opens it */ }
@@ -569,7 +592,7 @@ document.getElementById("strategy-form").addEventListener("submit", async (event
   const saved = await res.json();
   if (destChanged) {
     // separate TOTP-gated route (F17); the window opened above usually covers it
-    editing = saved;
+    editing = { ...saved, tiles: editing?.tiles };
     const destRes = await withTotp((totp) => api(`/api/strategies/${saved.id}/destination`, totp ? { destination, totp } : { destination }));
     if (!destRes.ok) {
       msg.textContent = `Saved, but the destination was not: ${(await destRes.json().catch(() => ({}))).error ?? `error ${destRes.status}`}`;

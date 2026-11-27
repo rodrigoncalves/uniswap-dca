@@ -641,3 +641,17 @@ General lesson: a security-policy value that's "reasonable in your head" (README
 - **POL runway** projects the swap plus one transfer per external destination on a mixed-destination day (0 when all strategies share a destination), at the recent transfer average, or the swap average while there is no transfer history (never under-counts).
 
 **Trade-off.** Not atomic: the swap is final before any transfer, and a failed transfer leaves that WBTC in the DCA wallet (still the user's) until a retry succeeds or the user moves it. Each external destination costs an extra transfer's gas every mixed day, charged only to its strategies. New transfers wait while the DCA is paused (a broadcast one is still followed). The previous-tx check on a retry is one receipt read: if the node still lags then, a second transfer can be sent -- the same exposure as any false `nonce_consumed`, reduced, not removed. A stuck BROADCAST blocks later transfers until it resolves. Fork scenarios: `destination_mixed`, `destination_two`, `destination_transfer_kill9`, `destination_transfer_retry`.
+
+## #35 — A new max total must stay above what the strategy already invested
+
+**Date:** 2026-11-26
+**Status:** accepted
+
+**Context.** The app accepted any positive `maxTotal`, including one at or below the strategy's confirmed total. Because `limitReached` treats `invested >= maxTotal` as reached, such a cap completed the strategy on the spot and refused reactivation (`strategy #4: limit reached (max-total) -- raise the max total or move the end date first`), with nothing telling the user that saving the cap had just made the row unrevivable. A production strategy was left in exactly that state: a 170 USDT0 cap with 180 USDT0 invested.
+
+**Decision.**
+- `updateStrategy` refuses a patch whose max total is new and at or below `strategyUnits(..., "invested")`, with `strategy #<id>: max total <n> is not above the <invested> already invested -- raise it or clear it`; the route answers 409. Clearing the cap is always allowed.
+- "New" is compared in base units, so re-saving the same cap in another notation (`170` vs `170.0`) is not a change. An unchanged cap is never refused, so a strategy already below its own total (a cap lowered before this rule) keeps its label, amount and end date editable.
+- The edit dialog applies the same rule live via `setCustomValidity`, leaving the empty field valid, so the browser blocks the save before the PATCH.
+
+**Trade-off.** Lowering a cap to just above the invested total is still possible (60 after 60.5 is refused, 60.5 after 60 is not), so a strategy can be left with a tiny budget; stopping further buying by hand remains the "Complete" button. No migration: existing rows are untouched, and the fix for one already below its total is to raise or clear the cap.
